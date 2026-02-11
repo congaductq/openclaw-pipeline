@@ -1,4 +1,4 @@
-.PHONY: help install-docker onboard-docker docker-build docker-shell docker-clean update-docker logs-docker test-docker setup-docker-env reset-env sync-docker-config quick-docker start open approve
+.PHONY: help install-docker onboard-docker docker-build docker-shell docker-clean update-docker logs-docker test-docker setup-docker-env reset-env sync-docker-config quick-docker start open approve deploy-init deploy-plan deploy-apply deploy-destroy k8s-apply k8s-status k8s-logs k8s-shell k8s-secret
 
 # Variables
 GATEWAY_PORT ?= 18789
@@ -106,3 +106,57 @@ start: install-docker sync-docker-config open ## Start Docker (uses existing .en
 	@echo "If dashboard says 'pairing required', run: make approve"
 
 quick-docker: setup-docker-env start ## First-time setup + start
+
+# ── AWS EKS Deployment ──────────────────────────────────────
+
+deploy-init: ## Initialize Terraform
+	terraform -chdir=terraform init
+
+deploy-plan: ## Preview infrastructure changes
+	terraform -chdir=terraform plan
+
+deploy-apply: ## Apply infrastructure (creates EKS cluster)
+	terraform -chdir=terraform apply
+	@echo ""
+	@echo "Configure kubectl:"
+	@terraform -chdir=terraform output -raw kubeconfig_command
+	@echo ""
+
+deploy-destroy: ## Destroy all AWS infrastructure
+	terraform -chdir=terraform destroy
+
+# ── Kubernetes ──────────────────────────────────────────────
+
+k8s-apply: ## Apply all Kubernetes manifests
+	kubectl apply -f k8s/namespace.yaml
+	kubectl apply -f k8s/storageclass.yaml
+	kubectl apply -f k8s/configmap.yaml
+	kubectl apply -f k8s/secret.yaml
+	kubectl apply -f k8s/pvc.yaml
+	kubectl apply -f k8s/deployment.yaml
+	kubectl apply -f k8s/service.yaml
+	@echo ""
+	@echo "Waiting for deployment..."
+	kubectl rollout status deployment/openclaw -n openclaw --timeout=120s
+	@echo ""
+	@echo "Service endpoint:"
+	@kubectl get svc openclaw -n openclaw -o jsonpath='{.status.loadBalancer.ingress[0].hostname}' 2>/dev/null || echo "(pending)"
+	@echo ":$(GATEWAY_PORT)"
+
+k8s-status: ## Show Kubernetes resource status
+	kubectl get all -n openclaw
+
+k8s-logs: ## Tail OpenClaw pod logs
+	kubectl logs -f deployment/openclaw -n openclaw
+
+k8s-shell: ## Open shell in OpenClaw pod
+	kubectl exec -it deployment/openclaw -n openclaw -- /bin/sh
+
+k8s-secret: ## Create K8s secret from .env file
+	@if [ ! -f .env ]; then echo "No .env file found. Run 'make setup-docker-env' first."; exit 1; fi
+	@echo "Creating Kubernetes secret from .env..."
+	@kubectl create secret generic openclaw-secrets \
+		--namespace=openclaw \
+		--from-env-file=.env \
+		--dry-run=client -o yaml | kubectl apply -f -
+	@echo "Secret created/updated in namespace openclaw"

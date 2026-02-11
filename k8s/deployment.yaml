@@ -1,0 +1,112 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: openclaw
+  namespace: openclaw
+  labels:
+    app: openclaw
+spec:
+  replicas: 1
+  strategy:
+    type: Recreate
+  selector:
+    matchLabels:
+      app: openclaw
+  template:
+    metadata:
+      labels:
+        app: openclaw
+    spec:
+      securityContext:
+        fsGroup: 1000
+      initContainers:
+        - name: config-init
+          image: ghcr.io/openclaw/openclaw:latest
+          command: ["/bin/sh", "-c"]
+          args:
+            - |
+              if [ ! -f /home/node/.openclaw/openclaw.json ]; then
+                echo '{"gateway":{"port":18789,"bind":"lan","auth":{"mode":"token","token":"'$(cat /etc/openclaw-secrets/OPENCLAW_GATEWAY_TOKEN)'"}},"agents":{"defaults":{"workspace":"/home/node/openclaw/workspace"}}}' > /home/node/.openclaw/openclaw.json
+                echo "Config seeded"
+              else
+                # Patch existing config for container environment
+                TMP=$(mktemp)
+                node -e "
+                  const fs = require('fs');
+                  const cfg = JSON.parse(fs.readFileSync('/home/node/.openclaw/openclaw.json'));
+                  cfg.gateway = cfg.gateway || {};
+                  cfg.gateway.bind = 'lan';
+                  cfg.gateway.port = 18789;
+                  cfg.agents = cfg.agents || {};
+                  cfg.agents.defaults = cfg.agents.defaults || {};
+                  cfg.agents.defaults.workspace = '/home/node/openclaw/workspace';
+                  fs.writeFileSync('$TMP', JSON.stringify(cfg, null, 2));
+                "
+                cp "$TMP" /home/node/.openclaw/openclaw.json
+                rm -f "$TMP"
+                echo "Config patched"
+              fi
+          volumeMounts:
+            - name: config
+              mountPath: /home/node/.openclaw
+            - name: secrets
+              mountPath: /etc/openclaw-secrets
+              readOnly: true
+      containers:
+        - name: openclaw
+          image: ghcr.io/openclaw/openclaw:latest
+          ports:
+            - name: gateway
+              containerPort: 18789
+              protocol: TCP
+          envFrom:
+            - configMapRef:
+                name: openclaw-config
+            - secretRef:
+                name: openclaw-secrets
+          volumeMounts:
+            - name: config
+              mountPath: /home/node/.openclaw
+            - name: workspace
+              mountPath: /home/node/openclaw/workspace
+          resources:
+            requests:
+              cpu: "1"
+              memory: 2Gi
+            limits:
+              cpu: "2"
+              memory: 4Gi
+          livenessProbe:
+            exec:
+              command:
+                - node
+                - /app/openclaw.mjs
+                - gateway
+                - health
+                - --url
+                - ws://127.0.0.1:18789
+            initialDelaySeconds: 40
+            periodSeconds: 30
+            timeoutSeconds: 10
+          readinessProbe:
+            exec:
+              command:
+                - node
+                - /app/openclaw.mjs
+                - gateway
+                - health
+                - --url
+                - ws://127.0.0.1:18789
+            initialDelaySeconds: 20
+            periodSeconds: 10
+            timeoutSeconds: 5
+      volumes:
+        - name: config
+          persistentVolumeClaim:
+            claimName: openclaw-config
+        - name: workspace
+          persistentVolumeClaim:
+            claimName: openclaw-workspace
+        - name: secrets
+          secret:
+            secretName: openclaw-secrets

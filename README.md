@@ -1,4 +1,4 @@
-# OpenClaw Docker Deployment
+# OpenClaw Deployment Pipeline
 
 ## Quick Start
 
@@ -54,3 +54,77 @@ make onboard-docker
 | `make open` | Open dashboard in browser (auto-authenticates) |
 | `make setup-docker-env` | Generate `.env` from `openclaw.json` |
 | `make sync-docker-config` | Sync `openclaw.json` into running container |
+| `make approve` | Approve pending browser device for dashboard |
+
+## AWS EKS Deployment
+
+Deploy OpenClaw to a managed Kubernetes cluster on AWS.
+
+### Prerequisites
+
+- [AWS CLI](https://aws.amazon.com/cli/) configured with credentials
+- [Terraform](https://www.terraform.io/downloads) >= 1.5
+- [kubectl](https://kubernetes.io/docs/tasks/tools/)
+
+### 1. Configure Terraform
+
+```bash
+cp terraform/terraform.tfvars.example terraform/terraform.tfvars
+# Edit terraform.tfvars with your preferred region, instance type, etc.
+```
+
+### 2. Create EKS Cluster
+
+```bash
+make deploy-init     # Initialize Terraform
+make deploy-plan     # Preview changes
+make deploy-apply    # Create VPC + EKS cluster (~15 min)
+```
+
+### 3. Configure kubectl
+
+```bash
+aws eks update-kubeconfig --region ap-southeast-1 --name openclaw
+```
+
+### 4. Create Secrets
+
+Option A — from `.env` file:
+```bash
+make setup-docker-env   # Generate .env if not exists
+make k8s-secret         # Create K8s secret from .env
+```
+
+Option B — edit `k8s/secret.yaml` directly and apply:
+```bash
+kubectl apply -f k8s/secret.yaml
+```
+
+### 5. Deploy to Kubernetes
+
+```bash
+make k8s-apply
+```
+
+### 6. Access Dashboard
+
+```bash
+# Get the NLB endpoint
+kubectl get svc openclaw -n openclaw
+
+# Open: http://<NLB-HOSTNAME>:18789
+```
+
+### EKS Commands
+
+| Command | Description |
+|---------|-------------|
+| `make deploy-init` | Initialize Terraform |
+| `make deploy-plan` | Preview infrastructure changes |
+| `make deploy-apply` | Create/update AWS infrastructure |
+| `make deploy-destroy` | Destroy all AWS resources |
+| `make k8s-apply` | Deploy OpenClaw to Kubernetes |
+| `make k8s-status` | Show all resources in openclaw namespace |
+| `make k8s-logs` | Tail pod logs |
+| `make k8s-shell` | Shell into running pod |
+| `make k8s-secret` | Create K8s secret from `.env` file |
