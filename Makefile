@@ -1,4 +1,4 @@
-.PHONY: help install-docker onboard-docker docker-build docker-shell docker-clean update-docker logs-docker test-docker setup-docker-env reset-env sync-docker-config quick-docker start open approve deploy-init deploy-plan deploy-apply deploy-destroy k8s-apply k8s-status k8s-logs k8s-shell k8s-secret
+.PHONY: help install-docker onboard-docker docker-build docker-shell docker-clean update-docker logs-docker test-docker setup-docker-env reset-env sync-docker-config quick-docker start open approve deploy-init deploy-plan deploy-apply deploy-destroy k8s-apply k8s-status k8s-logs k8s-shell k8s-secret quick-deploy
 
 # Variables
 GATEWAY_PORT ?= 18789
@@ -106,6 +106,8 @@ start: install-docker sync-docker-config open ## Start Docker (uses existing .en
 	@echo "If dashboard says 'pairing required', run: make approve"
 
 quick-docker: setup-docker-env start ## First-time setup + start
+
+quick-deploy: setup-docker-env deploy-init deploy-apply k8s-secret k8s-apply ## First-time EKS deploy (all-in-one)
 
 # ── AWS EKS Deployment ──────────────────────────────────────
 
