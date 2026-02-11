@@ -1,4 +1,4 @@
-.PHONY: help install-docker onboard-docker docker-build docker-shell docker-clean update-docker logs-docker test-docker setup-docker-env reset-env clone-config sync-docker-config quick-docker start open approve deploy-init deploy-plan deploy-apply deploy-destroy k8s-apply k8s-status k8s-logs k8s-shell k8s-secret quick-deploy
+.PHONY: help install-docker onboard-docker docker-build docker-shell docker-clean clean update-docker logs-docker test-docker setup-docker-env reset-env clone-config sync-docker-config quick-docker start open approve deploy-init deploy-plan deploy-apply deploy-destroy k8s-apply k8s-status k8s-logs k8s-shell k8s-secret quick-deploy
 
 # Variables — pass via CLI: make quick-docker OPENAI_API_KEY=xxx
 GATEWAY_PORT ?= 18789
@@ -32,6 +32,9 @@ ifdef MISTRAL_API_KEY
 endif
 ifdef OPENROUTER_API_KEY
   export OPENROUTER_API_KEY
+endif
+ifdef CLAUDE_CODE_OAUTH_TOKEN
+  export CLAUDE_CODE_OAUTH_TOKEN
 endif
 
 help: ## Show this help message
@@ -86,6 +89,12 @@ docker-shell: ## Open shell in container
 docker-clean: ## Clean Docker resources
 	docker-compose down -v
 	docker image prune -f
+
+clean: ## Full reset (containers, volumes, .env)
+	@docker-compose down -v 2>/dev/null || true
+	@rm -f .env
+	@echo "Cleaned: containers, volumes, paired devices, .env"
+	@echo "Run 'make quick-docker CLAUDE_CODE_OAUTH_TOKEN=xxx' to start fresh"
 
 setup-docker-env: ## Generate .env (skips if exists; TOKEN=xxx ANTHROPIC_API_KEY=sk-xxx)
 	@if [ -f .env ]; then \
@@ -157,7 +166,17 @@ start: install-docker ## Start Docker (uses existing .env)
 	fi
 	@docker cp /tmp/openclaw-docker.json openclaw:/home/node/.openclaw/openclaw.json
 	@rm -f /tmp/openclaw-docker.json
-	@docker start openclaw >/dev/null 2>&1
+	@OAUTH=$$(grep '^CLAUDE_CODE_OAUTH_TOKEN=.' .env 2>/dev/null | cut -d= -f2); \
+	if [ -n "$$OAUTH" ]; then \
+		docker start openclaw >/dev/null 2>&1; sleep 2; \
+		docker exec -u root openclaw mkdir -p /home/node/.openclaw/agents/main/agent; \
+		printf '{"version":1,"profiles":{"anthropic:default":{"type":"api_key","provider":"anthropic","key":"%s"}},"lastGood":{"anthropic":"anthropic:default"}}' "$$OAUTH" > /tmp/auth-profiles.json; \
+		docker cp /tmp/auth-profiles.json openclaw:/home/node/.openclaw/agents/main/agent/auth-profiles.json; \
+		rm -f /tmp/auth-profiles.json; \
+		docker restart openclaw >/dev/null 2>&1; \
+	else \
+		docker start openclaw >/dev/null 2>&1; \
+	fi
 	@sleep 2
 	@docker exec -u root openclaw chown -R node:node /home/node/.openclaw /home/node/openclaw 2>/dev/null || true
 	@echo "[3/5] Waiting for gateway to be healthy..."
@@ -175,7 +194,21 @@ start: install-docker ## Start Docker (uses existing .env)
 	@sleep 5
 	@$(MAKE) approve 2>/dev/null || true
 	@echo ""
-	@echo "OpenClaw is running! Dashboard: http://localhost:$(GATEWAY_PORT)"
+	@PROVIDER=""; \
+	if grep -q '^CLAUDE_CODE_OAUTH_TOKEN=.' .env 2>/dev/null; then PROVIDER="Claude AI (OAuth)"; \
+	elif grep -q '^ANTHROPIC_API_KEY=.' .env 2>/dev/null; then PROVIDER="Claude AI"; \
+	elif grep -q '^GEMINI_API_KEY=.' .env 2>/dev/null; then PROVIDER="Gemini AI"; \
+	elif grep -q '^OPENAI_API_KEY=.' .env 2>/dev/null; then PROVIDER="OpenAI"; \
+	elif grep -q '^GROQ_API_KEY=.' .env 2>/dev/null; then PROVIDER="Groq AI"; \
+	elif grep -q '^XAI_API_KEY=.' .env 2>/dev/null; then PROVIDER="xAI (Grok)"; \
+	elif grep -q '^MISTRAL_API_KEY=.' .env 2>/dev/null; then PROVIDER="Mistral AI"; \
+	elif grep -q '^OPENROUTER_API_KEY=.' .env 2>/dev/null; then PROVIDER="OpenRouter"; \
+	fi; \
+	if [ -n "$$PROVIDER" ]; then \
+		echo "OpenClaw is running with $$PROVIDER! Dashboard: http://localhost:$(GATEWAY_PORT)"; \
+	else \
+		echo "OpenClaw is running! Dashboard: http://localhost:$(GATEWAY_PORT)"; \
+	fi
 
 quick-docker: setup-docker-env start ## First-time setup + start
 

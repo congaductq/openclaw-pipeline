@@ -96,6 +96,7 @@ HAS_KEYS=false
 [ -n "$XAI_API_KEY" ] && echo "  xAI API key: set" && HAS_KEYS=true
 [ -n "$MISTRAL_API_KEY" ] && echo "  Mistral API key: set" && HAS_KEYS=true
 [ -n "$OPENROUTER_API_KEY" ] && echo "  OpenRouter API key: set" && HAS_KEYS=true
+[ -n "$CLAUDE_CODE_OAUTH_TOKEN" ] && echo "  Claude Code OAuth token: set" && HAS_KEYS=true
 
 if [ "$HAS_KEYS" = false ]; then
     echo ""
@@ -123,6 +124,9 @@ GROQ_API_KEY=${GROQ_API_KEY}
 XAI_API_KEY=${XAI_API_KEY}
 MISTRAL_API_KEY=${MISTRAL_API_KEY}
 OPENROUTER_API_KEY=${OPENROUTER_API_KEY}
+
+# Claude Code OAuth Token
+CLAUDE_CODE_OAUTH_TOKEN=${CLAUDE_CODE_OAUTH_TOKEN}
 
 # Model Configuration
 DEFAULT_MODEL=${DEFAULT_MODEL}
