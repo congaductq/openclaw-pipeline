@@ -6,7 +6,11 @@
 make quick-docker
 ```
 
-This will auto-extract config from `~/.openclaw/openclaw.json`, generate `.env`, start the container, and sync config.
+Auto-generates `.env` with a new token and starts the container. Pass API keys inline:
+
+```bash
+make quick-docker OPENAI_API_KEY=xxx
+```
 
 ## Manual Setup
 
