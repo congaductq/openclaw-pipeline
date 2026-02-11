@@ -96,9 +96,81 @@ verify-auth: ## Verify auth-profiles.json in container
 	@docker exec openclaw cat /home/node/.openclaw/agents/main/agent/auth-profiles.json 2>/dev/null | jq '.' || \
 		echo "Cannot read file (may not exist or container not running)"
 
+check-model: ## Show current model configuration
+	@echo "Model Configuration:"
+	@echo "==================="
+	@if [ -f .env ]; then \
+		MODEL=$$(grep '^DEFAULT_MODEL=' .env 2>/dev/null | cut -d= -f2); \
+		PROVIDER=$$(grep '^DEFAULT_PROVIDER=' .env 2>/dev/null | cut -d= -f2); \
+		if [ -n "$$MODEL" ]; then \
+			echo "  Current (.env):  $$MODEL"; \
+		fi; \
+		if [ -n "$$PROVIDER" ]; then \
+			echo "  Provider:        $$PROVIDER"; \
+		fi; \
+	else \
+		echo "  No .env file found"; \
+	fi
+	@echo "  Default (code):  claude-sonnet-4-5-20250929 (Sonnet 4.5)"
+	@echo ""
+	@echo "Available Claude Models:"
+	@echo "  - claude-sonnet-4-5-20250929 (Sonnet 4.5) [Recommended]"
+	@echo "  - claude-opus-4-6            (Opus 4.6)   [Most capable]"
+	@echo "  - claude-haiku-4-5-20251001  (Haiku 4.5)  [Fastest]"
+	@echo ""
+	@if docker exec openclaw true 2>/dev/null; then \
+		echo "Container model:"; \
+		docker exec openclaw sh -c 'echo "  $$DEFAULT_MODEL"' 2>/dev/null || echo "  (not set)"; \
+	else \
+		echo "Container not running"; \
+	fi
+
 docker-clean: ## Clean Docker resources
 	docker-compose down -v
 	docker image prune -f
+
+docker-clean-all: ## Clean ALL Docker except OpenClaw (containers, images, volumes, networks)
+	@echo "⚠️  WARNING: This will remove ALL Docker resources except OpenClaw!"
+	@echo ""
+	@echo "What will be cleaned:"
+	@echo "  - All stopped containers (except openclaw)"
+	@echo "  - All unused images"
+	@echo "  - All volumes (except openclaw-config, openclaw-workspace)"
+	@echo "  - All unused networks"
+	@echo ""
+	@echo "Starting cleanup in 3 seconds... (Ctrl+C to cancel)"
+	@sleep 3
+	@echo ""
+	@echo "[1/4] Removing non-OpenClaw containers..."
+	@for container in $$(docker ps -aq 2>/dev/null); do \
+		name=$$(docker inspect --format='{{.Name}}' $$container 2>/dev/null | sed 's/^\///'); \
+		if [ "$$name" != "openclaw" ]; then \
+			echo "  Removing: $$name"; \
+			docker rm -f $$container 2>/dev/null || true; \
+		fi; \
+	done
+	@echo "[2/4] Removing unused images..."
+	@docker image prune -af 2>/dev/null || true
+	@echo "[3/4] Removing non-OpenClaw volumes..."
+	@for vol in $$(docker volume ls -q 2>/dev/null); do \
+		case "$$vol" in \
+			openclaw-config|openclaw-workspace|*openclaw*) \
+				echo "  Preserving: $$vol" ;; \
+			*) \
+				echo "  Removing: $$vol"; \
+				docker volume rm $$vol 2>/dev/null || true ;; \
+		esac; \
+	done
+	@echo "[4/4] Removing unused networks..."
+	@docker network prune -f 2>/dev/null || true
+	@echo ""
+	@echo "✓ Cleanup complete!"
+	@echo ""
+	@echo "OpenClaw Status:"
+	@docker ps -a --filter "name=openclaw" --format "table {{.Names}}\t{{.Status}}\t{{.Ports}}" 2>/dev/null || echo "  Container not found"
+	@echo ""
+	@echo "OpenClaw Volumes:"
+	@docker volume ls --filter "name=openclaw" --format "table {{.Name}}\t{{.Driver}}" 2>/dev/null || echo "  No volumes found"
 
 clean: ## Full reset (containers, volumes, .env, temp files)
 	@docker-compose down -v 2>/dev/null || true

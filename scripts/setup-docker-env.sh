@@ -86,7 +86,7 @@ fi
 
 # --- Defaults ---
 GATEWAY_PORT="${GATEWAY_PORT:-18789}"
-DEFAULT_MODEL="${DEFAULT_MODEL:-claude-sonnet-4-20250514}"
+DEFAULT_MODEL="${DEFAULT_MODEL:-claude-sonnet-4-5-20250929}"
 echo "  Port: $GATEWAY_PORT"
 echo "  Model: $DEFAULT_MODEL"
 
@@ -107,6 +107,27 @@ if [ "$HAS_KEYS" = false ]; then
     echo "    ANTHROPIC_API_KEY=sk-xxx make quick-docker"
     echo "    or edit .env after generation"
 fi
+
+# --- Extract provider from model ID (before writing .env) ---
+case "${DEFAULT_MODEL}" in
+    claude-*)
+        DEFAULT_PROVIDER=anthropic
+        ;;
+    gemini-*|palm-*)
+        DEFAULT_PROVIDER=google
+        ;;
+    gpt-*|o1-*|o3-*)
+        DEFAULT_PROVIDER=openai
+        ;;
+    */*)
+        # Handle models with provider prefix (e.g., "openrouter/claude-sonnet-4")
+        DEFAULT_PROVIDER=$(echo "${DEFAULT_MODEL}" | cut -d'/' -f1)
+        ;;
+    *)
+        # Fallback: try to extract from model name or use anthropic as default
+        DEFAULT_PROVIDER=anthropic
+        ;;
+esac
 
 # --- Write .env ---
 cat > "$ENV_FILE" << EOF
@@ -133,7 +154,7 @@ CLAUDE_CODE_OAUTH_TOKEN=${CLAUDE_CODE_OAUTH_TOKEN}
 
 # Model Configuration
 DEFAULT_MODEL=${DEFAULT_MODEL}
-DEFAULT_PROVIDER=$(echo "${DEFAULT_MODEL}" | cut -d'/' -f1)
+DEFAULT_PROVIDER=${DEFAULT_PROVIDER}
 
 # Security Settings
 EXEC_ASK=on
