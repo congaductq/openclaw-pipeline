@@ -1,6 +1,9 @@
 #!/bin/bash
 # Prepare .env for Docker from env vars, CLI flags, or project-local config (opt-in).
 #
+# NOTE: This script only creates the .env file. User auth-profiles (OAuth tokens)
+#       are automatically generated and copied into Docker by the 'make start' target.
+#
 # Usage:
 #   ./scripts/setup-docker-env.sh                              # env vars only, auto-generate token
 #   ./scripts/setup-docker-env.sh --token <token>              # explicit token

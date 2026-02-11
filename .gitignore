@@ -47,3 +47,5 @@ npm-debug.log*
 workspace/
 .openclaw/
 openclaw.json
+user-profiles/
+auth-profiles.json

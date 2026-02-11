@@ -86,14 +86,26 @@ docker-build: ## Build Docker image
 docker-shell: ## Open shell in container
 	docker exec -it openclaw /bin/sh
 
+verify-auth: ## Verify auth-profiles.json in container
+	@echo "Checking auth-profiles.json in container..."
+	@docker exec openclaw test -f /home/node/.openclaw/agents/main/agent/auth-profiles.json && \
+		echo "✓ auth-profiles.json exists" || \
+		echo "✗ auth-profiles.json NOT found"
+	@echo ""
+	@echo "Content:"
+	@docker exec openclaw cat /home/node/.openclaw/agents/main/agent/auth-profiles.json 2>/dev/null | jq '.' || \
+		echo "Cannot read file (may not exist or container not running)"
+
 docker-clean: ## Clean Docker resources
 	docker-compose down -v
 	docker image prune -f
 
-clean: ## Full reset (containers, volumes, .env)
+clean: ## Full reset (containers, volumes, .env, temp files)
 	@docker-compose down -v 2>/dev/null || true
 	@rm -f .env
-	@echo "Cleaned: containers, volumes, paired devices, .env"
+	@rm -f /tmp/openclaw-docker.json /tmp/auth-profiles.json 2>/dev/null || true
+	@rm -rf user-profiles/ auth-profiles.json 2>/dev/null || true
+	@echo "Cleaned: containers, volumes, auth-profiles, .env, temp files"
 	@echo "Run 'make quick-docker CLAUDE_CODE_OAUTH_TOKEN=xxx' to start fresh"
 
 setup-docker-env: ## Generate .env (skips if exists; TOKEN=xxx ANTHROPIC_API_KEY=sk-xxx)
@@ -208,6 +220,13 @@ start: install-docker ## Start Docker (uses existing .env)
 		echo "OpenClaw is running with $$PROVIDER! Dashboard: http://localhost:$(GATEWAY_PORT)"; \
 	else \
 		echo "OpenClaw is running! Dashboard: http://localhost:$(GATEWAY_PORT)"; \
+	fi
+	@if grep -q '^CLAUDE_CODE_OAUTH_TOKEN=.' .env 2>/dev/null; then \
+		echo ""; \
+		echo "Auth Profile Status:"; \
+		docker exec openclaw test -f /home/node/.openclaw/agents/main/agent/auth-profiles.json 2>/dev/null && \
+			echo "  ✓ Claude OAuth auth-profiles.json configured" || \
+			echo "  ✗ auth-profiles.json not found (check logs)"; \
 	fi
 
 quick-docker: setup-docker-env start ## First-time setup + start
