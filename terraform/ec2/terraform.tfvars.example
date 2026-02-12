@@ -1,0 +1,12 @@
+# Copy this file to terraform.tfvars and customize
+
+aws_region      = "us-west-2"
+instance_type   = "t3.small"
+key_name        = "openclaw"  # Your AWS SSH key pair name
+gateway_port    = 18789
+volume_size     = 30  # Minimum 30GB for Amazon Linux 2023
+use_elastic_ip  = true
+
+# Deployment name - use different names for multiple deployments
+# Examples: "main", "claude", "gemini", "openai", "dev", "prod"
+deployment_name = "main"

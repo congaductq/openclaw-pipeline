@@ -303,7 +303,207 @@ start: install-docker ## Start Docker (uses existing .env)
 
 quick-docker: setup-docker-env start ## First-time setup + start
 
+# ── EC2 Deployment (Fast & Simple) ──────────────────────────────
+
+# Deployment name for multi-instance support (default: main)
+# Support both NAME=foo and name=foo (case-insensitive)
+ifdef name
+NAME := $(name)
+endif
+NAME ?= main
+TF_STATE := terraform-$(NAME).tfstate
+
+# Cloudflare tunnel flag (CLOUDFLARE=true to auto-enable)
+ifdef cloudflare
+CLOUDFLARE := $(cloudflare)
+endif
+CLOUDFLARE ?= false
+
+ec2-create-key: ## Create SSH key pair via CLI (one-time)
+	@echo "Creating SSH key pair 'openclaw' in AWS..."
+	@mkdir -p ~/.ssh
+	@aws ec2 create-key-pair \
+		--key-name openclaw \
+		--query 'KeyMaterial' \
+		--output text > ~/.ssh/openclaw.pem 2>/dev/null && \
+		chmod 400 ~/.ssh/openclaw.pem && \
+		echo "✓ SSH key created: ~/.ssh/openclaw.pem" && \
+		echo "" && \
+		echo "Key pair 'openclaw' created in AWS" || \
+		(echo "⚠️  Key pair 'openclaw' already exists in AWS or error occurred"; \
+		 echo ""; \
+		 echo "Options:"; \
+		 echo "  1. Use existing key (if you have ~/.ssh/openclaw.pem)"; \
+		 echo "  2. Delete and recreate: make ec2-delete-key && make ec2-create-key")
+
+ec2-delete-key: ## Delete SSH key pair
+	@echo "Deleting SSH key pair 'openclaw'..."
+	@aws ec2 delete-key-pair --key-name openclaw 2>/dev/null || echo "Key pair not found in AWS"
+	@rm -f ~/.ssh/openclaw.pem
+	@echo "✓ Key pair deleted from AWS and local file removed"
+
+ec2-config: ## Create terraform.tfvars for EC2
+	@if [ ! -f terraform/ec2/terraform.tfvars ]; then \
+		echo "Creating terraform/ec2/terraform.tfvars..."; \
+		cp terraform/ec2/terraform.tfvars.example terraform/ec2/terraform.tfvars; \
+		echo "✓ Config file created: terraform/ec2/terraform.tfvars"; \
+	else \
+		echo "terraform.tfvars already exists"; \
+		CURRENT_SIZE=$$(grep '^volume_size' terraform/ec2/terraform.tfvars | grep -oE '[0-9]+'); \
+		if [ -n "$$CURRENT_SIZE" ] && [ "$$CURRENT_SIZE" -lt 30 ]; then \
+			echo "⚠️  Warning: volume_size = $$CURRENT_SIZE is too small (minimum 30GB)"; \
+			echo "Updating volume_size to 30GB..."; \
+			sed -i.bak 's/^volume_size[[:space:]]*=.*/volume_size     = 30  # Minimum 30GB for Amazon Linux 2023/' terraform/ec2/terraform.tfvars; \
+			rm -f terraform/ec2/terraform.tfvars.bak; \
+			echo "✓ Updated volume_size to 30GB"; \
+		fi; \
+	fi
+
+ec2-init: ## Initialize Terraform for EC2
+	terraform -chdir=terraform/ec2 init
+
+ec2-plan: ## Preview EC2 infrastructure changes
+	@echo "Planning deployment: $(NAME)"
+	terraform -chdir=terraform/ec2 plan -state=$(TF_STATE) -var="deployment_name=$(NAME)"
+
+ec2-setup: ec2-init ## Create EC2 instance (one-time, ~2 min)
+	@echo "Creating EC2 instance: openclaw-$(NAME)"
+	terraform -chdir=terraform/ec2 apply -auto-approve -state=$(TF_STATE) -var="deployment_name=$(NAME)"
+	@echo ""
+	@echo "================================================================"
+	@terraform -chdir=terraform/ec2 output -state=$(TF_STATE) -json | jq -r '"  SSH: \(.ssh_command.value)"'
+	@terraform -chdir=terraform/ec2 output -state=$(TF_STATE) -json | jq -r '"  URL: \(.dashboard_url.value)"'
+	@echo "================================================================"
+	@echo ""
+	@echo "Waiting 60s for instance to boot and install Docker..."
+	@sleep 60
+	@echo "Instance ready! Deploy with: make deploy-ec2 NAME=$(NAME)"
+
+deploy-ec2: setup-docker-env ## Deploy OpenClaw to EC2 (~30 sec)
+	@chmod +x scripts/deploy-ec2.sh scripts/setup-cloudflare-tunnel.sh scripts/ec2-approve.sh 2>/dev/null || true
+	@TF_STATE=$(TF_STATE) DEPLOY_NAME=$(NAME) SETUP_CLOUDFLARE=$(CLOUDFLARE) ./scripts/deploy-ec2.sh
+
+ec2-logs: ## Tail OpenClaw logs on EC2
+	@EC2_IP=$$(terraform -chdir=terraform/ec2 output -state=$(TF_STATE) -raw public_ip 2>/dev/null); \
+	SSH_KEY=$$(terraform -chdir=terraform/ec2 output -state=$(TF_STATE) -json | jq -r '.ssh_command.value' | sed -n 's/.*-i \([^ ]*\).*/\1/p' | sed "s|^~|$$HOME|"); \
+	ssh -i "$$SSH_KEY" -o StrictHostKeyChecking=no ec2-user@$$EC2_IP \
+		"cd /home/ec2-user/openclaw && docker compose logs -f"
+
+ec2-shell: ## SSH into EC2 instance
+	@EC2_IP=$$(terraform -chdir=terraform/ec2 output -state=$(TF_STATE) -raw public_ip 2>/dev/null); \
+	SSH_KEY=$$(terraform -chdir=terraform/ec2 output -state=$(TF_STATE) -json | jq -r '.ssh_command.value' | sed -n 's/.*-i \([^ ]*\).*/\1/p' | sed "s|^~|$$HOME|"); \
+	echo "Connecting to openclaw-$(NAME) ($$EC2_IP)..."; \
+	ssh -i "$$SSH_KEY" -o StrictHostKeyChecking=no ec2-user@$$EC2_IP
+
+ec2-tunnel: ## Create SSH tunnel for secure localhost access
+	@EC2_IP=$$(terraform -chdir=terraform/ec2 output -state=$(TF_STATE) -raw public_ip 2>/dev/null); \
+	SSH_KEY=$$(terraform -chdir=terraform/ec2 output -state=$(TF_STATE) -json | jq -r '.ssh_command.value' | sed -n 's/.*-i \([^ ]*\).*/\1/p' | sed "s|^~|$$HOME|"); \
+	TOKEN=$$(grep '^OPENCLAW_GATEWAY_TOKEN=' .env 2>/dev/null | cut -d= -f2); \
+	echo "Creating SSH tunnel to openclaw-$(NAME)..."; \
+	echo ""; \
+	echo "🔗 Access via localhost:"; \
+	echo "   http://localhost:18789#token=$$TOKEN"; \
+	echo ""; \
+	echo "Press Ctrl+C to close tunnel"; \
+	echo ""; \
+	ssh -i "$$SSH_KEY" -o StrictHostKeyChecking=no -L 18789:localhost:18789 -N ec2-user@$$EC2_IP
+
+ec2-approve: ## Approve pending browser device on EC2 (run after opening chat URL)
+	@EC2_IP=$$(terraform -chdir=terraform/ec2 output -state=$(TF_STATE) -raw public_ip 2>/dev/null); \
+	SSH_KEY=$$(terraform -chdir=terraform/ec2 output -state=$(TF_STATE) -json | jq -r '.ssh_command.value' | sed -n 's/.*-i \([^ ]*\).*/\1/p' | sed "s|^~|$$HOME|"); \
+	TOKEN=$$(grep '^OPENCLAW_GATEWAY_TOKEN=' .env 2>/dev/null | cut -d= -f2); \
+	if [ -z "$$EC2_IP" ]; then \
+		echo "Error: No EC2 instance found for NAME=$(NAME)"; \
+		exit 1; \
+	fi; \
+	chmod +x scripts/ec2-approve.sh; \
+	./scripts/ec2-approve.sh "$$EC2_IP" "$$SSH_KEY" "$$TOKEN"
+
+ec2-cloudflare-tunnel: ## Setup Cloudflare Tunnel for HTTPS access (no domain needed)
+	@EC2_IP=$$(terraform -chdir=terraform/ec2 output -state=$(TF_STATE) -raw public_ip 2>/dev/null); \
+	SSH_KEY=$$(terraform -chdir=terraform/ec2 output -state=$(TF_STATE) -json | jq -r '.ssh_command.value' | sed -n 's/.*-i \([^ ]*\).*/\1/p' | sed "s|^~|$$HOME|"); \
+	if [ -z "$$EC2_IP" ]; then \
+		echo "Error: No EC2 instance found for NAME=$(NAME)"; \
+		echo ""; \
+		echo "Deploy an instance first:"; \
+		echo "  make ec2-full-setup NAME=$(NAME) CLAUDE_CODE_OAUTH_TOKEN=sk-ant-oat01-..."; \
+		exit 1; \
+	fi; \
+	chmod +x scripts/setup-cloudflare-tunnel.sh; \
+	./scripts/setup-cloudflare-tunnel.sh "$$EC2_IP" "$$SSH_KEY"
+
+ec2-cloudflare-stop: ## Stop Cloudflare Tunnel
+	@EC2_IP=$$(terraform -chdir=terraform/ec2 output -state=$(TF_STATE) -raw public_ip 2>/dev/null); \
+	SSH_KEY=$$(terraform -chdir=terraform/ec2 output -state=$(TF_STATE) -json | jq -r '.ssh_command.value' | sed -n 's/.*-i \([^ ]*\).*/\1/p' | sed "s|^~|$$HOME|"); \
+	chmod +x scripts/stop-cloudflare-tunnel.sh; \
+	./scripts/stop-cloudflare-tunnel.sh "$$EC2_IP" "$$SSH_KEY"
+
+ec2-restart: ## Restart OpenClaw on EC2
+	@EC2_IP=$$(terraform -chdir=terraform/ec2 output -state=$(TF_STATE) -raw public_ip 2>/dev/null); \
+	SSH_KEY=$$(terraform -chdir=terraform/ec2 output -state=$(TF_STATE) -json | jq -r '.ssh_command.value' | sed -n 's/.*-i \([^ ]*\).*/\1/p' | sed "s|^~|$$HOME|"); \
+	ssh -i "$$SSH_KEY" -o StrictHostKeyChecking=no ec2-user@$$EC2_IP \
+		"cd /home/ec2-user/openclaw && docker compose restart"
+
+ec2-url: ## Show EC2 dashboard URL and SSH info
+	@echo "OpenClaw EC2 Instance: openclaw-$(NAME)"
+	@echo "========================================"
+	@EC2_IP=$$(terraform -chdir=terraform/ec2 output -state=$(TF_STATE) -raw public_ip 2>/dev/null); \
+	SSH_KEY=$$(terraform -chdir=terraform/ec2 output -state=$(TF_STATE) -json | jq -r '.ssh_command.value' | sed -n 's/.*-i \([^ ]*\).*/\1/p' | sed "s|^~|$$HOME|"); \
+	TOKEN=$$(grep '^OPENCLAW_GATEWAY_TOKEN=' .env 2>/dev/null | cut -d= -f2); \
+	echo ""; \
+	echo "💬 Chat Interface (works via HTTP):"; \
+	echo "   http://$$EC2_IP:18789/chat?session=main"; \
+	echo ""; \
+	echo "🎛️  Control UI (requires tunnel):"; \
+	echo "   Run: make ec2-tunnel NAME=$(NAME)"; \
+	echo "   Then: http://localhost:18789"; \
+	echo ""; \
+	echo "💻 SSH Access:"; \
+	echo "   ssh -i $$SSH_KEY ec2-user@$$EC2_IP"; \
+	echo ""; \
+	echo "📋 Quick Commands:"; \
+	echo "   make ec2-logs NAME=$(NAME)     # Tail logs"; \
+	echo "   make ec2-shell NAME=$(NAME)    # SSH session"; \
+	echo "   make ec2-tunnel NAME=$(NAME)   # Tunnel for control UI"
+	@echo ""
+
+ec2-destroy: ## Destroy EC2 instance
+	@echo "Destroying deployment: $(NAME)"
+	terraform -chdir=terraform/ec2 destroy -auto-approve -state=$(TF_STATE) -var="deployment_name=$(NAME)"
+
+ec2-full-setup: ## Complete EC2 setup from scratch (key + config + instance + deploy + optional CLOUDFLARE=true)
+	@echo "================================================================"
+	@echo "  OpenClaw EC2 Full Setup: openclaw-$(NAME)"
+	@echo "================================================================"
+	@echo ""
+	@echo "[1/4] Creating SSH key pair..."
+	@$(MAKE) ec2-create-key
+	@echo ""
+	@echo "[2/4] Creating Terraform config..."
+	@$(MAKE) ec2-config
+	@echo ""
+	@echo "[3/4] Setting up EC2 instance..."
+	@$(MAKE) ec2-setup NAME=$(NAME)
+	@echo ""
+	@echo "[4/4] Deploying OpenClaw (+ Cloudflare tunnel if CLOUDFLARE=true)..."
+	@$(MAKE) deploy-ec2 NAME=$(NAME) CLOUDFLARE=$(CLOUDFLARE)
+	@echo "================================================================"
+	@echo "  ✓ Complete! openclaw-$(NAME) is running on EC2"
+	@echo "================================================================"
+
+quick-ec2: ## One-command EC2 setup + deploy (requires existing SSH key)
+	@$(MAKE) ec2-setup NAME=$(NAME)
+	@$(MAKE) deploy-ec2 NAME=$(NAME)
+	@$(MAKE) ec2-url NAME=$(NAME)
+
+# ── AWS EKS Deployment (Production-grade) ────────────────────────
+
 quick-deploy: setup-docker-env deploy-init deploy-apply k8s-secret k8s-apply ## First-time EKS deploy (all-in-one)
+	@echo ""
+	@echo "🎉 Quick deploy complete!"
+	@echo ""
+	@echo "To get the dashboard URL again:"
+	@echo "  make k8s-url"
 
 # ── AWS EKS Deployment ──────────────────────────────────────
 
@@ -337,9 +537,39 @@ k8s-apply: ## Apply all Kubernetes manifests
 	@echo "Waiting for deployment..."
 	kubectl rollout status deployment/openclaw -n openclaw --timeout=120s
 	@echo ""
-	@echo "Service endpoint:"
-	@kubectl get svc openclaw -n openclaw -o jsonpath='{.status.loadBalancer.ingress[0].hostname}' 2>/dev/null || echo "(pending)"
-	@echo ":$(GATEWAY_PORT)"
+	@echo "================================================================"
+	@echo "  OpenClaw deployed successfully!"
+	@echo "================================================================"
+	@echo ""
+	@HOST=$$(kubectl get svc openclaw -n openclaw -o jsonpath='{.status.loadBalancer.ingress[0].hostname}' 2>/dev/null); \
+	if [ -z "$$HOST" ]; then \
+		echo "⚠️  LoadBalancer hostname not yet assigned. Run 'make k8s-status' to check."; \
+		echo ""; \
+		echo "To get the URL later:"; \
+		echo "  make k8s-url"; \
+	else \
+		TOKEN=$$(grep '^OPENCLAW_GATEWAY_TOKEN=' .env 2>/dev/null | cut -d= -f2); \
+		URL="http://$$HOST:$(GATEWAY_PORT)"; \
+		if [ -n "$$TOKEN" ]; then \
+			URL_WITH_TOKEN="$$URL#token=$$TOKEN"; \
+			echo "Dashboard URL (with auth):"; \
+			echo "  $$URL_WITH_TOKEN"; \
+			echo ""; \
+			echo "Dashboard URL (manual auth):"; \
+			echo "  $$URL"; \
+			echo "  Gateway Token: $$TOKEN"; \
+		else \
+			echo "Dashboard URL:"; \
+			echo "  $$URL"; \
+		fi; \
+	fi
+	@echo ""
+	@echo "Useful commands:"
+	@echo "  make k8s-status  - Show resource status"
+	@echo "  make k8s-logs    - Tail pod logs"
+	@echo "  make k8s-shell   - Open shell in pod"
+	@echo "  make k8s-url     - Show dashboard URL"
+	@echo "================================================================"
 
 k8s-status: ## Show Kubernetes resource status
 	kubectl get all -n openclaw
@@ -358,3 +588,31 @@ k8s-secret: ## Create K8s secret from .env file
 		--from-env-file=.env \
 		--dry-run=client -o yaml | kubectl apply -f -
 	@echo "Secret created/updated in namespace openclaw"
+
+k8s-url: ## Show OpenClaw dashboard URL with authentication
+	@echo "OpenClaw Dashboard URL:"
+	@echo "======================"
+	@HOST=$$(kubectl get svc openclaw -n openclaw -o jsonpath='{.status.loadBalancer.ingress[0].hostname}' 2>/dev/null); \
+	if [ -z "$$HOST" ]; then \
+		echo "⚠️  LoadBalancer not ready yet. Checking status..."; \
+		echo ""; \
+		kubectl get svc openclaw -n openclaw; \
+		echo ""; \
+		echo "Wait a few minutes and try again: make k8s-url"; \
+	else \
+		TOKEN=$$(grep '^OPENCLAW_GATEWAY_TOKEN=' .env 2>/dev/null | cut -d= -f2); \
+		URL="http://$$HOST:$(GATEWAY_PORT)"; \
+		echo ""; \
+		if [ -n "$$TOKEN" ]; then \
+			echo "🔗 Click to open (auto-login):"; \
+			echo "   $$URL#token=$$TOKEN"; \
+			echo ""; \
+			echo "📋 Manual access:"; \
+			echo "   URL:   $$URL"; \
+			echo "   Token: $$TOKEN"; \
+		else \
+			echo "🔗 Dashboard URL:"; \
+			echo "   $$URL"; \
+		fi; \
+	fi
+	@echo ""
