@@ -322,19 +322,20 @@ CLOUDFLARE ?= false
 ec2-create-key: ## Create SSH key pair via CLI (one-time)
 	@echo "Creating SSH key pair 'openclaw' in AWS..."
 	@mkdir -p ~/.ssh
-	@aws ec2 create-key-pair \
-		--key-name openclaw \
-		--query 'KeyMaterial' \
-		--output text > ~/.ssh/openclaw.pem 2>/dev/null && \
-		chmod 400 ~/.ssh/openclaw.pem && \
-		echo "✓ SSH key created: ~/.ssh/openclaw.pem" && \
-		echo "" && \
-		echo "Key pair 'openclaw' created in AWS" || \
-		(echo "⚠️  Key pair 'openclaw' already exists in AWS or error occurred"; \
-		 echo ""; \
-		 echo "Options:"; \
-		 echo "  1. Use existing key (if you have ~/.ssh/openclaw.pem)"; \
-		 echo "  2. Delete and recreate: make ec2-delete-key && make ec2-create-key")
+	@if [ -f ~/.ssh/openclaw.pem ] && aws ec2 describe-key-pairs --key-names openclaw >/dev/null 2>&1; then \
+		echo "SSH key already exists — skipping"; \
+	else \
+		chmod 644 ~/.ssh/openclaw.pem 2>/dev/null || true; \
+		aws ec2 create-key-pair \
+			--key-name openclaw \
+			--query 'KeyMaterial' \
+			--output text > ~/.ssh/openclaw.pem 2>/dev/null && \
+			chmod 400 ~/.ssh/openclaw.pem && \
+			echo "SSH key created: ~/.ssh/openclaw.pem" || \
+			(echo "Key pair 'openclaw' already exists in AWS or error occurred"; \
+			 echo "  1. Use existing key (if you have ~/.ssh/openclaw.pem)"; \
+			 echo "  2. Delete and recreate: make ec2-delete-key && make ec2-create-key"); \
+	fi
 
 ec2-delete-key: ## Delete SSH key pair
 	@echo "Deleting SSH key pair 'openclaw'..."
@@ -349,7 +350,7 @@ ec2-config: ## Create terraform.tfvars for EC2
 		echo "✓ Config file created: terraform/ec2/terraform.tfvars"; \
 	else \
 		echo "terraform.tfvars already exists"; \
-		CURRENT_SIZE=$$(grep '^volume_size' terraform/ec2/terraform.tfvars | grep -oE '[0-9]+'); \
+		CURRENT_SIZE=$$(grep '^volume_size' terraform/ec2/terraform.tfvars | sed 's/.*=[[:space:]]*//' | grep -oE '^[0-9]+'); \
 		if [ -n "$$CURRENT_SIZE" ] && [ "$$CURRENT_SIZE" -lt 30 ]; then \
 			echo "⚠️  Warning: volume_size = $$CURRENT_SIZE is too small (minimum 30GB)"; \
 			echo "Updating volume_size to 30GB..."; \
@@ -477,24 +478,76 @@ ec2-full-setup: ## Complete EC2 setup from scratch (key + config + instance + de
 	@echo "================================================================"
 	@echo ""
 	@echo "[1/4] Creating SSH key pair..."
+	@./scripts/webhook-notify.sh creating_key "creating SSH key pair" $(NAME) 2>/dev/null || true
 	@$(MAKE) ec2-create-key
 	@echo ""
 	@echo "[2/4] Creating Terraform config..."
+	@./scripts/webhook-notify.sh creating_config "creating Terraform config" $(NAME) 2>/dev/null || true
 	@$(MAKE) ec2-config
 	@echo ""
 	@echo "[3/4] Setting up EC2 instance..."
+	@./scripts/webhook-notify.sh creating_ec2 "creating EC2 instance (~2 min)" $(NAME) 2>/dev/null || true
 	@$(MAKE) ec2-setup NAME=$(NAME)
 	@echo ""
 	@echo "[4/4] Deploying OpenClaw (+ Cloudflare tunnel if CLOUDFLARE=true)..."
 	@$(MAKE) deploy-ec2 NAME=$(NAME) CLOUDFLARE=$(CLOUDFLARE)
 	@echo "================================================================"
-	@echo "  ✓ Complete! openclaw-$(NAME) is running on EC2"
+	@echo "  Complete! openclaw-$(NAME) is running on EC2"
 	@echo "================================================================"
 
 quick-ec2: ## One-command EC2 setup + deploy (requires existing SSH key)
 	@$(MAKE) ec2-setup NAME=$(NAME)
 	@$(MAKE) deploy-ec2 NAME=$(NAME)
 	@$(MAKE) ec2-url NAME=$(NAME)
+
+# ── Pipeline Server (Go API on EC2) ─────────────────────────────
+
+SERVER_PORT ?= 4000
+FRONTEND_URL ?= http://localhost:3000
+
+server-setup: ec2-init ## Create EC2 for pipeline server (~2 min)
+	@echo "Creating Pipeline Server EC2 instance..."
+	terraform -chdir=terraform/ec2 apply -auto-approve -state=terraform-server.tfstate -var="deployment_name=server"
+	@echo ""
+	@echo "Waiting 60s for instance boot + Docker install..."
+	@sleep 60
+	@echo "Instance ready! Deploy with: make server-deploy"
+
+server-deploy: ## Deploy Go pipeline server to EC2
+	@chmod +x scripts/deploy-server.sh
+	@TF_STATE=terraform-server.tfstate DEPLOY_NAME=server FRONTEND_URL=$(FRONTEND_URL) SERVER_PORT=$(SERVER_PORT) ./scripts/deploy-server.sh
+
+server-full-setup: ## Complete pipeline server setup (key + EC2 + deploy)
+	@echo "================================================================"
+	@echo "  Pipeline Server Full Setup"
+	@echo "================================================================"
+	@echo ""
+	@echo "[1/3] Creating SSH key pair..."
+	@$(MAKE) ec2-create-key
+	@echo ""
+	@echo "[2/3] Setting up EC2 instance..."
+	@$(MAKE) ec2-config
+	@$(MAKE) server-setup
+	@echo ""
+	@echo "[3/3] Deploying pipeline server..."
+	@$(MAKE) server-deploy FRONTEND_URL=$(FRONTEND_URL)
+	@echo "================================================================"
+	@echo "  Pipeline Server is running!"
+	@echo "================================================================"
+
+server-logs: ## Tail pipeline server logs
+	@EC2_IP=$$(terraform -chdir=terraform/ec2 output -state=terraform-server.tfstate -raw public_ip 2>/dev/null); \
+	SSH_KEY=$$(terraform -chdir=terraform/ec2 output -state=terraform-server.tfstate -json | jq -r '.ssh_command.value' | sed -n 's/.*-i \([^ ]*\).*/\1/p' | sed "s|^~|$$HOME|"); \
+	ssh -i "$$SSH_KEY" -o StrictHostKeyChecking=no ec2-user@$$EC2_IP "journalctl -u pipeline-server -f --no-pager"
+
+server-url: ## Show pipeline server URL
+	@EC2_IP=$$(terraform -chdir=terraform/ec2 output -state=terraform-server.tfstate -raw public_ip 2>/dev/null); \
+	echo "Pipeline Server: http://$$EC2_IP:$(SERVER_PORT)"; \
+	echo "Swagger:         http://$$EC2_IP:$(SERVER_PORT)/swagger"; \
+	echo "Health:          http://$$EC2_IP:$(SERVER_PORT)/health"
+
+server-destroy: ## Destroy pipeline server EC2
+	terraform -chdir=terraform/ec2 destroy -auto-approve -state=terraform-server.tfstate -var="deployment_name=server"
 
 # ── AWS EKS Deployment (Production-grade) ────────────────────────
 

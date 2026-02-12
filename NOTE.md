@@ -1,0 +1,1 @@
+ssh -i ~/.ssh/openclaw.pem ec2-user@44.245.68.12

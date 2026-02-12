@@ -1,0 +1,368 @@
+{
+  "openapi": "3.0.3",
+  "info": {
+    "title": "OpenClaw Pipeline API",
+    "description": "API server that orchestrates OpenClaw EC2 deployments.\n\n## Architecture\n```\nFrontend (3000) --> POST /launch --> Go Server (4000) --> runs make ec2-full-setup\nDocker/Scripts   --> POST /webhook/event --> Go Server (4000) --> forwards to Frontend (3000)\n```\n\nThe Go server manages `make` commands. Docker/scripts monitor their own logs and POST progress events to `/webhook/event`. The server forwards these to the frontend and auto-triggers `/approve` when `pairing_required` is detected.",
+    "version": "1.0.0"
+  },
+  "servers": [
+    {
+      "url": "http://localhost:4000",
+      "description": "Local development"
+    }
+  ],
+  "paths": {
+    "/launch": {
+      "post": {
+        "tags": ["Pipeline"],
+        "summary": "Launch EC2 deployment",
+        "description": "Triggers `make ec2-full-setup` asynchronously. Returns 202 immediately. Progress events are sent by scripts via `POST /webhook/event`, which the server forwards to the frontend.",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/LaunchRequest"
+              },
+              "example": {
+                "name": "main",
+                "token": "",
+                "claude_code_oauth_token": "sk-ant-oat01-...",
+                "cloudflare": true
+              }
+            }
+          }
+        },
+        "responses": {
+          "202": {
+            "description": "Deployment started",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/AcceptedResponse"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Invalid request (missing required fields)",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "Deployment already running for this name",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/approve": {
+      "post": {
+        "tags": ["Pipeline"],
+        "summary": "Approve pending device",
+        "description": "Triggers device approval (runs `make ec2-approve`). Also auto-triggered when the server receives a `pairing_required` webhook event.",
+        "requestBody": {
+          "required": false,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/ApproveRequest"
+              },
+              "example": {
+                "name": "main"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Device approved",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/MessageResponse"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Approval failed",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/webhook/event": {
+      "post": {
+        "tags": ["Webhook"],
+        "summary": "Receive progress event from Docker/scripts",
+        "description": "Docker containers and shell scripts POST progress events here. The server forwards them to the frontend (`FRONTEND_URL/api/webhook/pipeline`) and auto-triggers `POST /approve` when `type` is `pairing_required`.",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/WebhookEvent"
+              },
+              "examples": {
+                "progress": {
+                  "summary": "Progress event",
+                  "value": {
+                    "type": "creating_ec2",
+                    "name": "main",
+                    "message": "creating EC2 instance (~2 min)"
+                  }
+                },
+                "pairing": {
+                  "summary": "Pairing required (auto-triggers approve)",
+                  "value": {
+                    "type": "pairing_required",
+                    "name": "main",
+                    "message": "device pairing required"
+                  }
+                }
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Event forwarded to frontend",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "status": {
+                      "type": "string",
+                      "example": "forwarded"
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Invalid JSON",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/status": {
+      "get": {
+        "tags": ["Info"],
+        "summary": "Get running deployments",
+        "description": "Returns the list of currently running deployment names.",
+        "responses": {
+          "200": {
+            "description": "Status",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/StatusResponse"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/health": {
+      "get": {
+        "tags": ["Info"],
+        "summary": "Health check",
+        "responses": {
+          "200": {
+            "description": "Healthy",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/MessageResponse"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/swagger": {
+      "get": {
+        "tags": ["Docs"],
+        "summary": "Swagger UI",
+        "description": "Interactive API documentation.",
+        "responses": {
+          "200": {
+            "description": "HTML page"
+          }
+        }
+      }
+    }
+  },
+  "components": {
+    "schemas": {
+      "LaunchRequest": {
+        "type": "object",
+        "required": ["claude_code_oauth_token"],
+        "properties": {
+          "name": {
+            "type": "string",
+            "default": "main",
+            "description": "Deployment name (supports multiple parallel deployments)"
+          },
+          "token": {
+            "type": "string",
+            "description": "Gateway token (auto-generated if empty)"
+          },
+          "claude_code_oauth_token": {
+            "type": "string",
+            "description": "Claude Code OAuth token (required)"
+          },
+          "cloudflare": {
+            "type": "boolean",
+            "default": false,
+            "description": "Enable Cloudflare tunnel for HTTPS access"
+          }
+        }
+      },
+      "ApproveRequest": {
+        "type": "object",
+        "properties": {
+          "name": {
+            "type": "string",
+            "default": "main",
+            "description": "Deployment name to approve device for"
+          }
+        }
+      },
+      "AcceptedResponse": {
+        "type": "object",
+        "properties": {
+          "status": {
+            "type": "string",
+            "example": "accepted"
+          },
+          "name": {
+            "type": "string",
+            "example": "main"
+          },
+          "message": {
+            "type": "string",
+            "example": "ec2-full-setup started. Progress will be sent via webhook."
+          }
+        }
+      },
+      "StatusResponse": {
+        "type": "object",
+        "properties": {
+          "running_deployments": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "example": ["main", "claude"]
+          },
+          "count": {
+            "type": "integer",
+            "example": 2
+          }
+        }
+      },
+      "MessageResponse": {
+        "type": "object",
+        "properties": {
+          "status": {
+            "type": "string",
+            "example": "ok"
+          },
+          "name": {
+            "type": "string"
+          },
+          "message": {
+            "type": "string"
+          }
+        }
+      },
+      "ErrorResponse": {
+        "type": "object",
+        "properties": {
+          "error": {
+            "type": "string"
+          }
+        }
+      },
+      "WebhookEvent": {
+        "type": "object",
+        "description": "Progress event. Sent by Docker/scripts to the Go server, and forwarded by the server to `FRONTEND_URL/api/webhook/pipeline`.",
+        "required": ["type", "message"],
+        "properties": {
+          "type": {
+            "type": "string",
+            "enum": [
+              "launching",
+              "creating_key",
+              "creating_config",
+              "creating_ec2",
+              "deploying_app",
+              "pulling_image",
+              "starting_app",
+              "health_check",
+              "setting_up_cloudflare",
+              "auto_approving",
+              "pairing_required",
+              "completed",
+              "failed",
+              "approve_triggered",
+              "approve_success",
+              "approve_failed"
+            ],
+            "description": "Event type indicating current progress stage"
+          },
+          "name": {
+            "type": "string",
+            "default": "main",
+            "description": "Deployment name"
+          },
+          "message": {
+            "type": "string",
+            "description": "Human-readable progress message",
+            "example": "creating EC2 instance (~2 min)"
+          },
+          "timestamp": {
+            "type": "string",
+            "format": "date-time",
+            "description": "Auto-filled by server if empty",
+            "example": "2026-02-12T10:30:00Z"
+          },
+          "data": {
+            "description": "Optional extra payload",
+            "type": "object"
+          }
+        }
+      }
+    }
+  }
+}

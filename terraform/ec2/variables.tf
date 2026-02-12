@@ -7,7 +7,7 @@ variable "aws_region" {
 variable "instance_type" {
   description = "EC2 instance type"
   type        = string
-  default     = "t3.small" # 2 vCPU, 2GB RAM - good for OpenClaw
+  default     = "t3.xlarge" # 4 vCPU, 16GB RAM
 }
 
 variable "key_name" {

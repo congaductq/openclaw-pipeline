@@ -49,6 +49,14 @@ resource "aws_security_group" "openclaw" {
     cidr_blocks = ["0.0.0.0/0"]
   }
 
+  ingress {
+    description = "Pipeline Server API"
+    from_port   = 4000
+    to_port     = 4000
+    protocol    = "tcp"
+    cidr_blocks = ["0.0.0.0/0"]
+  }
+
   egress {
     description = "Allow all outbound"
     from_port   = 0

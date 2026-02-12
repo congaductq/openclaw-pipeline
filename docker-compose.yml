@@ -45,6 +45,33 @@ services:
           cpus: '1.0'
           memory: 2G
 
+  pipeline-server:
+    build:
+      context: ./server
+      dockerfile: Dockerfile
+    container_name: pipeline-server
+    restart: unless-stopped
+
+    ports:
+      - "${SERVER_PORT:-4000}:4000"
+
+    volumes:
+      # Mount the pipeline project so the server can run make commands
+      - .:/app/pipeline
+      # Mount AWS credentials and SSH keys for terraform/EC2 access
+      - ~/.aws:/root/.aws:ro
+      - ~/.ssh:/root/.ssh:ro
+      # Mount Docker socket so it can run docker commands on host
+      - /var/run/docker.sock:/var/run/docker.sock
+
+    environment:
+      - SERVER_PORT=4000
+      - FRONTEND_URL=${FRONTEND_URL:-http://host.docker.internal:3000}
+      - PIPELINE_DIR=/app/pipeline
+
+    depends_on:
+      - openclaw
+
 volumes:
   openclaw-config:
     driver: local
