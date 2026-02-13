@@ -13,6 +13,7 @@ YELLOW='\033[1;33m'
 NC='\033[0m'
 
 DEPLOY_NAME=${DEPLOY_NAME:-server}
+TF_DIR=${TF_DIR:-terraform/ec2}
 TF_STATE=${TF_STATE:-terraform-server.tfstate}
 FRONTEND_URL=${FRONTEND_URL:-http://localhost:3000}
 SERVER_PORT=${SERVER_PORT:-4000}
@@ -22,14 +23,15 @@ if [ -z "$CLAUDE_CODE_OAUTH_TOKEN" ] && [ -f .env ]; then
   CLAUDE_CODE_OAUTH_TOKEN=$(grep '^CLAUDE_CODE_OAUTH_TOKEN=' .env 2>/dev/null | cut -d= -f2)
 fi
 
-# Get EC2 IP from terraform
-EC2_IP=$(terraform -chdir=terraform/ec2 output -state="$TF_STATE" -raw public_ip 2>/dev/null)
-if [ -z "$EC2_IP" ]; then
-  echo "Error: No EC2 instance found. Run 'make server-setup' first."
+# Get instance IP from terraform
+EC2_IP=$(terraform -chdir=$TF_DIR output -state="$TF_STATE" -raw public_ip 2>/dev/null)
+if ! echo "$EC2_IP" | grep -qE '^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$'; then
+  echo "Error: No valid instance IP found. Run setup first."
+  echo "  Got: $EC2_IP"
   exit 1
 fi
 
-SSH_KEY=$(terraform -chdir=terraform/ec2 output -state="$TF_STATE" -json 2>/dev/null | jq -r '.ssh_command.value' | sed -n 's/.*-i \([^ ]*\).*/\1/p' | sed "s|^~|$HOME|")
+SSH_KEY=$(terraform -chdir=$TF_DIR output -state="$TF_STATE" -json 2>/dev/null | jq -r '.ssh_command.value' | sed -n 's/.*-i \([^ ]*\).*/\1/p' | sed "s|^~|$HOME|")
 if [ -z "$SSH_KEY" ]; then
   SSH_KEY="$HOME/.ssh/openclaw.pem"
 fi
@@ -53,8 +55,8 @@ echo -e "${BLUE}[2/5] Installing tools on EC2 (terraform, aws-cli, make, jq)...$
 ssh -T $SSH_OPTS ec2-user@${EC2_IP} << 'ENDSSH'
 set -e
 
-# Install base tools
-sudo yum install -y make jq git tar gzip unzip curl 2>/dev/null || true
+# Install base tools (Amazon Linux 2023 uses dnf)
+sudo dnf install -y --allowerasing make jq git tar gzip unzip curl 2>&1 || sudo yum install -y make jq git tar gzip unzip curl 2>&1
 
 # Install terraform if missing
 if ! command -v terraform &>/dev/null; then
@@ -76,6 +78,7 @@ fi
 
 # Create dirs
 mkdir -p /home/ec2-user/pipeline/terraform/ec2
+mkdir -p /home/ec2-user/pipeline/terraform/lightsail
 mkdir -p /home/ec2-user/pipeline/scripts
 mkdir -p /home/ec2-user/pipeline/server
 
@@ -89,7 +92,7 @@ echo -e "${BLUE}[3/5] Copying pipeline project to EC2...${NC}"
 ssh -T $SSH_OPTS ec2-user@${EC2_IP} "sudo systemctl stop pipeline-server 2>/dev/null; rm -f /home/ec2-user/pipeline/pipeline-server" || true
 
 # Clean and recreate remote dirs to avoid nesting issues
-ssh -T $SSH_OPTS ec2-user@${EC2_IP} "rm -rf /home/ec2-user/pipeline/terraform/ec2 /home/ec2-user/pipeline/scripts && mkdir -p /home/ec2-user/pipeline/terraform/ec2 /home/ec2-user/pipeline/scripts"
+ssh -T $SSH_OPTS ec2-user@${EC2_IP} "rm -rf /home/ec2-user/pipeline/terraform/ec2 /home/ec2-user/pipeline/terraform/lightsail /home/ec2-user/pipeline/scripts && mkdir -p /home/ec2-user/pipeline/terraform/ec2 /home/ec2-user/pipeline/terraform/lightsail /home/ec2-user/pipeline/scripts"
 
 scp $SSH_OPTS pipeline-server ec2-user@${EC2_IP}:/home/ec2-user/pipeline/
 scp $SSH_OPTS Makefile ec2-user@${EC2_IP}:/home/ec2-user/pipeline/
@@ -108,6 +111,13 @@ scp $SSH_OPTS terraform/ec2/terraform.tfvars.example ec2-user@${EC2_IP}:/home/ec
 scp $SSH_OPTS terraform/ec2/terraform.tfvars ec2-user@${EC2_IP}:/home/ec2-user/pipeline/terraform/ec2/ 2>/dev/null || true
 # Copy .terraform.lock.hcl for provider pinning
 scp $SSH_OPTS terraform/ec2/.terraform.lock.hcl ec2-user@${EC2_IP}:/home/ec2-user/pipeline/terraform/ec2/ 2>/dev/null || true
+
+# Copy Lightsail terraform config files
+scp $SSH_OPTS terraform/lightsail/*.tf ec2-user@${EC2_IP}:/home/ec2-user/pipeline/terraform/lightsail/ 2>/dev/null || true
+scp $SSH_OPTS terraform/lightsail/user-data.sh ec2-user@${EC2_IP}:/home/ec2-user/pipeline/terraform/lightsail/ 2>/dev/null || true
+scp $SSH_OPTS terraform/lightsail/terraform.tfvars.example ec2-user@${EC2_IP}:/home/ec2-user/pipeline/terraform/lightsail/ 2>/dev/null || true
+scp $SSH_OPTS terraform/lightsail/terraform.tfvars ec2-user@${EC2_IP}:/home/ec2-user/pipeline/terraform/lightsail/ 2>/dev/null || true
+scp $SSH_OPTS terraform/lightsail/.terraform.lock.hcl ec2-user@${EC2_IP}:/home/ec2-user/pipeline/terraform/lightsail/ 2>/dev/null || true
 
 # Copy AWS credentials
 echo -e "  Copying AWS credentials..."

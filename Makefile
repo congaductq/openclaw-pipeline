@@ -1,4 +1,4 @@
-.PHONY: help install-docker onboard-docker docker-build docker-shell docker-clean clean update-docker logs-docker test-docker setup-docker-env reset-env clone-config sync-docker-config quick-docker start open approve deploy-init deploy-plan deploy-apply deploy-destroy k8s-apply k8s-status k8s-logs k8s-shell k8s-secret quick-deploy
+.PHONY: help install-docker onboard-docker docker-build docker-shell docker-clean clean update-docker logs-docker test-docker setup-docker-env reset-env clone-config sync-docker-config quick-docker start open approve deploy-init deploy-plan deploy-apply deploy-destroy k8s-apply k8s-status k8s-logs k8s-shell k8s-secret quick-deploy ls-create-key ls-delete-key ls-config ls-init ls-plan ls-setup ls-destroy deploy-ls ls-full-setup quick-ls ls-logs ls-shell ls-tunnel ls-url ls-restart ls-approve ls-cloudflare-tunnel ls-cloudflare-stop server-ls-setup server-ls-deploy server-ls-full-setup server-ls-logs server-ls-url server-ls-destroy
 
 # Variables — pass via CLI: make quick-docker OPENAI_API_KEY=xxx
 GATEWAY_PORT ?= 18789
@@ -41,7 +41,7 @@ help: ## Show this help message
 	@echo 'Usage: make [target]'
 	@echo ''
 	@echo 'Available targets:'
-	@grep -E '^[a-zA-Z_-]+:.*?## .*$$' $(MAKEFILE_LIST) | sort | awk 'BEGIN {FS = ":.*?## "}; {printf "  \033[36m%-20s\033[0m %s\n", $$1, $$2}'
+	@grep -E '^[a-zA-Z0-9_-]+:.*?## .*$$' $(MAKEFILE_LIST) | sort | awk 'BEGIN {FS = ":.*?## "}; {printf "  \033[36m%-20s\033[0m %s\n", $$1, $$2}'
 
 install-docker: ## Install OpenClaw via Docker
 	@echo "Installing via Docker..."
@@ -305,6 +305,9 @@ quick-docker: setup-docker-env start ## First-time setup + start
 
 # ── EC2 Deployment (Fast & Simple) ──────────────────────────────
 
+# AWS region (must match terraform/ec2/variables.tf default)
+AWS_REGION ?= us-west-2
+
 # Deployment name for multi-instance support (default: main)
 # Support both NAME=foo and name=foo (case-insensitive)
 ifdef name
@@ -320,14 +323,15 @@ endif
 CLOUDFLARE ?= false
 
 ec2-create-key: ## Create SSH key pair via CLI (one-time)
-	@echo "Creating SSH key pair 'openclaw' in AWS..."
+	@echo "Creating SSH key pair 'openclaw' in AWS ($(AWS_REGION))..."
 	@mkdir -p ~/.ssh
-	@if [ -f ~/.ssh/openclaw.pem ] && aws ec2 describe-key-pairs --key-names openclaw >/dev/null 2>&1; then \
+	@if [ -f ~/.ssh/openclaw.pem ] && aws ec2 describe-key-pairs --key-names openclaw --region $(AWS_REGION) >/dev/null 2>&1; then \
 		echo "SSH key already exists — skipping"; \
 	else \
 		chmod 644 ~/.ssh/openclaw.pem 2>/dev/null || true; \
 		aws ec2 create-key-pair \
 			--key-name openclaw \
+			--region $(AWS_REGION) \
 			--query 'KeyMaterial' \
 			--output text > ~/.ssh/openclaw.pem 2>/dev/null && \
 			chmod 400 ~/.ssh/openclaw.pem && \
@@ -338,8 +342,8 @@ ec2-create-key: ## Create SSH key pair via CLI (one-time)
 	fi
 
 ec2-delete-key: ## Delete SSH key pair
-	@echo "Deleting SSH key pair 'openclaw'..."
-	@aws ec2 delete-key-pair --key-name openclaw 2>/dev/null || echo "Key pair not found in AWS"
+	@echo "Deleting SSH key pair 'openclaw' from AWS ($(AWS_REGION))..."
+	@aws ec2 delete-key-pair --key-name openclaw --region $(AWS_REGION) 2>/dev/null || echo "Key pair not found in AWS"
 	@rm -f ~/.ssh/openclaw.pem
 	@echo "✓ Key pair deleted from AWS and local file removed"
 
@@ -500,14 +504,256 @@ quick-ec2: ## One-command EC2 setup + deploy (requires existing SSH key)
 	@$(MAKE) deploy-ec2 NAME=$(NAME)
 	@$(MAKE) ec2-url NAME=$(NAME)
 
+# ── Lightsail Deployment (Alternative — Fixed Pricing) ────────────
+
+LS_TF_DIR := terraform/lightsail
+LS_TF_STATE := terraform-ls-$(NAME).tfstate
+
+# Lightsail bundle override (BUNDLE=small_3_0 to use a smaller instance)
+# Instance default: medium_3_0 ($20/mo, 4GB, 2vCPU)
+# Server default:  xlarge_3_0 ($80/mo, 16GB, 4vCPU)
+ifdef BUNDLE
+  LS_BUNDLE_VAR := -var="bundle_id=$(BUNDLE)"
+else
+  LS_BUNDLE_VAR :=
+endif
+
+ls-create-key: ## Create SSH key pair for Lightsail (local keygen)
+	@echo "Creating SSH key pair for Lightsail..."
+	@mkdir -p ~/.ssh
+	@if [ -f ~/.ssh/openclaw-ls ]; then \
+		echo "SSH key already exists: ~/.ssh/openclaw-ls — skipping"; \
+	else \
+		ssh-keygen -t rsa -b 4096 -f ~/.ssh/openclaw-ls -N "" -C "openclaw-lightsail"; \
+		chmod 400 ~/.ssh/openclaw-ls; \
+		echo "SSH key created: ~/.ssh/openclaw-ls"; \
+	fi
+
+ls-delete-key: ## Delete Lightsail SSH key pair
+	@echo "Deleting Lightsail SSH key pair..."
+	@rm -f ~/.ssh/openclaw-ls ~/.ssh/openclaw-ls.pub
+	@echo "Local key pair deleted"
+
+ls-config: ## Create terraform.tfvars for Lightsail
+	@if [ ! -f $(LS_TF_DIR)/terraform.tfvars ]; then \
+		echo "Creating $(LS_TF_DIR)/terraform.tfvars..."; \
+		cp $(LS_TF_DIR)/terraform.tfvars.example $(LS_TF_DIR)/terraform.tfvars; \
+		echo "Config file created: $(LS_TF_DIR)/terraform.tfvars"; \
+	else \
+		echo "terraform.tfvars already exists"; \
+	fi
+
+ls-init: ## Initialize Terraform for Lightsail
+	terraform -chdir=$(LS_TF_DIR) init
+
+ls-plan: ## Preview Lightsail infrastructure changes
+	@echo "Planning deployment: $(NAME)"
+	terraform -chdir=$(LS_TF_DIR) plan -state=$(LS_TF_STATE) -var="deployment_name=$(NAME)"
+
+ls-setup: ls-init ## Create Lightsail instance (~1-2 min)
+	@echo "Creating Lightsail instance: openclaw-$(NAME)"
+	terraform -chdir=$(LS_TF_DIR) apply -auto-approve -state=$(LS_TF_STATE) -var="deployment_name=$(NAME)" $(LS_BUNDLE_VAR)
+	@echo ""
+	@echo "================================================================"
+	@terraform -chdir=$(LS_TF_DIR) output -state=$(LS_TF_STATE) -json | jq -r '"  SSH: \(.ssh_command.value)"'
+	@terraform -chdir=$(LS_TF_DIR) output -state=$(LS_TF_STATE) -json | jq -r '"  URL: \(.dashboard_url.value)"'
+	@echo "================================================================"
+	@echo ""
+	@echo "Waiting 60s for instance to boot and install Docker..."
+	@sleep 60
+	@echo "Instance ready! Deploy with: make deploy-ls NAME=$(NAME)"
+
+deploy-ls: setup-docker-env ## Deploy OpenClaw to Lightsail (~30 sec)
+	@chmod +x scripts/deploy-ec2.sh scripts/setup-cloudflare-tunnel.sh scripts/ec2-approve.sh 2>/dev/null || true
+	@TF_DIR=$(LS_TF_DIR) TF_STATE=$(LS_TF_STATE) DEPLOY_NAME=$(NAME) SETUP_CLOUDFLARE=$(CLOUDFLARE) ./scripts/deploy-ec2.sh
+
+ls-logs: ## Tail OpenClaw logs on Lightsail
+	@EC2_IP=$$(terraform -chdir=$(LS_TF_DIR) output -state=$(LS_TF_STATE) -raw public_ip 2>/dev/null); \
+	SSH_KEY=$$(terraform -chdir=$(LS_TF_DIR) output -state=$(LS_TF_STATE) -json | jq -r '.ssh_command.value' | sed -n 's/.*-i \([^ ]*\).*/\1/p' | sed "s|^~|$$HOME|"); \
+	ssh -i "$$SSH_KEY" -o StrictHostKeyChecking=no ec2-user@$$EC2_IP \
+		"cd /home/ec2-user/openclaw && docker compose logs -f"
+
+ls-shell: ## SSH into Lightsail instance
+	@EC2_IP=$$(terraform -chdir=$(LS_TF_DIR) output -state=$(LS_TF_STATE) -raw public_ip 2>/dev/null); \
+	SSH_KEY=$$(terraform -chdir=$(LS_TF_DIR) output -state=$(LS_TF_STATE) -json | jq -r '.ssh_command.value' | sed -n 's/.*-i \([^ ]*\).*/\1/p' | sed "s|^~|$$HOME|"); \
+	echo "Connecting to openclaw-$(NAME) ($$EC2_IP)..."; \
+	ssh -i "$$SSH_KEY" -o StrictHostKeyChecking=no ec2-user@$$EC2_IP
+
+ls-tunnel: ## Create SSH tunnel for secure localhost access
+	@EC2_IP=$$(terraform -chdir=$(LS_TF_DIR) output -state=$(LS_TF_STATE) -raw public_ip 2>/dev/null); \
+	SSH_KEY=$$(terraform -chdir=$(LS_TF_DIR) output -state=$(LS_TF_STATE) -json | jq -r '.ssh_command.value' | sed -n 's/.*-i \([^ ]*\).*/\1/p' | sed "s|^~|$$HOME|"); \
+	TOKEN=$$(grep '^OPENCLAW_GATEWAY_TOKEN=' .env 2>/dev/null | cut -d= -f2); \
+	echo "Creating SSH tunnel to openclaw-$(NAME)..."; \
+	echo ""; \
+	echo "Access via localhost:"; \
+	echo "   http://localhost:18789#token=$$TOKEN"; \
+	echo ""; \
+	echo "Press Ctrl+C to close tunnel"; \
+	echo ""; \
+	ssh -i "$$SSH_KEY" -o StrictHostKeyChecking=no -L 18789:localhost:18789 -N ec2-user@$$EC2_IP
+
+ls-approve: ## Approve pending browser device on Lightsail
+	@EC2_IP=$$(terraform -chdir=$(LS_TF_DIR) output -state=$(LS_TF_STATE) -raw public_ip 2>/dev/null); \
+	SSH_KEY=$$(terraform -chdir=$(LS_TF_DIR) output -state=$(LS_TF_STATE) -json | jq -r '.ssh_command.value' | sed -n 's/.*-i \([^ ]*\).*/\1/p' | sed "s|^~|$$HOME|"); \
+	TOKEN=$$(grep '^OPENCLAW_GATEWAY_TOKEN=' .env 2>/dev/null | cut -d= -f2); \
+	if [ -z "$$EC2_IP" ]; then \
+		echo "Error: No Lightsail instance found for NAME=$(NAME)"; \
+		exit 1; \
+	fi; \
+	chmod +x scripts/ec2-approve.sh; \
+	./scripts/ec2-approve.sh "$$EC2_IP" "$$SSH_KEY" "$$TOKEN"
+
+ls-cloudflare-tunnel: ## Setup Cloudflare Tunnel for HTTPS access
+	@EC2_IP=$$(terraform -chdir=$(LS_TF_DIR) output -state=$(LS_TF_STATE) -raw public_ip 2>/dev/null); \
+	SSH_KEY=$$(terraform -chdir=$(LS_TF_DIR) output -state=$(LS_TF_STATE) -json | jq -r '.ssh_command.value' | sed -n 's/.*-i \([^ ]*\).*/\1/p' | sed "s|^~|$$HOME|"); \
+	if [ -z "$$EC2_IP" ]; then \
+		echo "Error: No Lightsail instance found for NAME=$(NAME)"; \
+		echo ""; \
+		echo "Deploy an instance first:"; \
+		echo "  make ls-full-setup NAME=$(NAME) CLAUDE_CODE_OAUTH_TOKEN=sk-ant-oat01-..."; \
+		exit 1; \
+	fi; \
+	chmod +x scripts/setup-cloudflare-tunnel.sh; \
+	./scripts/setup-cloudflare-tunnel.sh "$$EC2_IP" "$$SSH_KEY"
+
+ls-cloudflare-stop: ## Stop Cloudflare Tunnel on Lightsail
+	@EC2_IP=$$(terraform -chdir=$(LS_TF_DIR) output -state=$(LS_TF_STATE) -raw public_ip 2>/dev/null); \
+	SSH_KEY=$$(terraform -chdir=$(LS_TF_DIR) output -state=$(LS_TF_STATE) -json | jq -r '.ssh_command.value' | sed -n 's/.*-i \([^ ]*\).*/\1/p' | sed "s|^~|$$HOME|"); \
+	chmod +x scripts/stop-cloudflare-tunnel.sh; \
+	./scripts/stop-cloudflare-tunnel.sh "$$EC2_IP" "$$SSH_KEY"
+
+ls-restart: ## Restart OpenClaw on Lightsail
+	@EC2_IP=$$(terraform -chdir=$(LS_TF_DIR) output -state=$(LS_TF_STATE) -raw public_ip 2>/dev/null); \
+	SSH_KEY=$$(terraform -chdir=$(LS_TF_DIR) output -state=$(LS_TF_STATE) -json | jq -r '.ssh_command.value' | sed -n 's/.*-i \([^ ]*\).*/\1/p' | sed "s|^~|$$HOME|"); \
+	ssh -i "$$SSH_KEY" -o StrictHostKeyChecking=no ec2-user@$$EC2_IP \
+		"cd /home/ec2-user/openclaw && docker compose restart"
+
+ls-url: ## Show Lightsail dashboard URL and SSH info
+	@echo "OpenClaw Lightsail Instance: openclaw-$(NAME)"
+	@echo "=============================================="
+	@EC2_IP=$$(terraform -chdir=$(LS_TF_DIR) output -state=$(LS_TF_STATE) -raw public_ip 2>/dev/null); \
+	SSH_KEY=$$(terraform -chdir=$(LS_TF_DIR) output -state=$(LS_TF_STATE) -json | jq -r '.ssh_command.value' | sed -n 's/.*-i \([^ ]*\).*/\1/p' | sed "s|^~|$$HOME|"); \
+	TOKEN=$$(grep '^OPENCLAW_GATEWAY_TOKEN=' .env 2>/dev/null | cut -d= -f2); \
+	echo ""; \
+	echo "Chat Interface (works via HTTP):"; \
+	echo "   http://$$EC2_IP:18789/chat?session=main"; \
+	echo ""; \
+	echo "Control UI (requires tunnel):"; \
+	echo "   Run: make ls-tunnel NAME=$(NAME)"; \
+	echo "   Then: http://localhost:18789"; \
+	echo ""; \
+	echo "SSH Access:"; \
+	echo "   ssh -i $$SSH_KEY ec2-user@$$EC2_IP"; \
+	echo ""; \
+	echo "Quick Commands:"; \
+	echo "   make ls-logs NAME=$(NAME)     # Tail logs"; \
+	echo "   make ls-shell NAME=$(NAME)    # SSH session"; \
+	echo "   make ls-tunnel NAME=$(NAME)   # Tunnel for control UI"
+	@echo ""
+
+ls-destroy: ## Destroy Lightsail instance
+	@echo "Destroying deployment: $(NAME)"
+	terraform -chdir=$(LS_TF_DIR) destroy -auto-approve -state=$(LS_TF_STATE) -var="deployment_name=$(NAME)"
+
+ls-full-setup: ## Complete Lightsail setup from scratch (key + config + instance + deploy + optional CLOUDFLARE=true)
+	@echo "================================================================"
+	@echo "  OpenClaw Lightsail Full Setup: openclaw-$(NAME)"
+	@echo "================================================================"
+	@echo ""
+	@echo "[1/4] Creating SSH key pair..."
+	@./scripts/webhook-notify.sh creating_key "creating SSH key pair" $(NAME) 2>/dev/null || true
+	@$(MAKE) ls-create-key
+	@echo ""
+	@echo "[2/4] Creating Terraform config..."
+	@./scripts/webhook-notify.sh creating_config "creating Terraform config" $(NAME) 2>/dev/null || true
+	@$(MAKE) ls-config
+	@echo ""
+	@echo "[3/4] Setting up Lightsail instance..."
+	@./scripts/webhook-notify.sh creating_instance "creating Lightsail instance (~1-2 min)" $(NAME) 2>/dev/null || true
+	@$(MAKE) ls-setup NAME=$(NAME)
+	@echo ""
+	@echo "[4/4] Deploying OpenClaw (+ Cloudflare tunnel if CLOUDFLARE=true)..."
+	@$(MAKE) deploy-ls NAME=$(NAME) CLOUDFLARE=$(CLOUDFLARE)
+	@echo "================================================================"
+	@echo "  Complete! openclaw-$(NAME) is running on Lightsail"
+	@echo "================================================================"
+
+quick-ls: ## One-command Lightsail setup + deploy (requires existing SSH key)
+	@$(MAKE) ls-setup NAME=$(NAME)
+	@$(MAKE) deploy-ls NAME=$(NAME)
+	@$(MAKE) ls-url NAME=$(NAME)
+
+# ── Pipeline Server on Lightsail ─────────────────────────────────
+
+server-ls-setup: ls-init ## Create Lightsail for pipeline server (~1-2 min)
+	@echo "Creating Pipeline Server Lightsail instance (xlarge — 4 vCPU, 16GB RAM)..."
+	@terraform -chdir=$(LS_TF_DIR) apply -auto-approve -state=terraform-ls-server.tfstate -var="deployment_name=server" -var="bundle_id=$(or $(BUNDLE),xlarge_3_0)" > /dev/null
+	@echo ""
+	@SERVER_IP=$$(terraform -chdir=$(LS_TF_DIR) output -state=terraform-ls-server.tfstate -raw public_ip 2>/dev/null); \
+	echo "================================================================"; \
+	echo "  Server IP: $$SERVER_IP"; \
+	echo "  API:       http://$$SERVER_IP:$(SERVER_PORT)"; \
+	echo "================================================================"
+	@echo ""
+	@echo "Waiting 60s for instance boot + Docker install..."
+	@sleep 60
+	@echo "Instance ready! Deploy with: make server-ls-deploy"
+
+server-ls-deploy: ## Deploy Go pipeline server to Lightsail
+	@chmod +x scripts/deploy-server.sh
+	@TF_DIR=$(LS_TF_DIR) TF_STATE=terraform-ls-server.tfstate DEPLOY_NAME=server FRONTEND_URL=$(FRONTEND_URL) SERVER_PORT=$(SERVER_PORT) ./scripts/deploy-server.sh
+
+server-ls-full-setup: ## Complete pipeline server setup on Lightsail (key + instance + deploy)
+	@echo "================================================================"
+	@echo "  Pipeline Server Full Setup (Lightsail)"
+	@echo "================================================================"
+	@echo ""
+	@echo "[1/3] Creating SSH key pair..."
+	@$(MAKE) ls-create-key
+	@echo ""
+	@echo "[2/3] Setting up Lightsail instance..."
+	@$(MAKE) ls-config
+	@$(MAKE) server-ls-setup
+	@echo ""
+	@echo "[3/3] Deploying pipeline server..."
+	@$(MAKE) server-ls-deploy FRONTEND_URL=$(FRONTEND_URL)
+	@echo "================================================================"
+	@echo "  Pipeline Server is running on Lightsail!"
+	@echo "================================================================"
+
+server-ls-logs: ## Tail pipeline server logs (Lightsail)
+	@EC2_IP=$$(terraform -chdir=$(LS_TF_DIR) output -state=terraform-ls-server.tfstate -raw public_ip 2>/dev/null); \
+	SSH_KEY=$$(terraform -chdir=$(LS_TF_DIR) output -state=terraform-ls-server.tfstate -json | jq -r '.ssh_command.value' | sed -n 's/.*-i \([^ ]*\).*/\1/p' | sed "s|^~|$$HOME|"); \
+	ssh -i "$$SSH_KEY" -o StrictHostKeyChecking=no ec2-user@$$EC2_IP "journalctl -u pipeline-server -f --no-pager"
+
+server-ls-url: ## Show pipeline server URL (Lightsail)
+	@EC2_IP=$$(terraform -chdir=$(LS_TF_DIR) output -state=terraform-ls-server.tfstate -raw public_ip 2>/dev/null); \
+	echo "Pipeline Server: http://$$EC2_IP:$(SERVER_PORT)"; \
+	echo "Swagger:         http://$$EC2_IP:$(SERVER_PORT)/swagger"; \
+	echo "Health:          http://$$EC2_IP:$(SERVER_PORT)/health"
+
+server-ls-destroy: ## Destroy pipeline server Lightsail instance
+	terraform -chdir=$(LS_TF_DIR) destroy -auto-approve -state=terraform-ls-server.tfstate -var="deployment_name=server"
+
 # ── Pipeline Server (Go API on EC2) ─────────────────────────────
 
 SERVER_PORT ?= 4000
 FRONTEND_URL ?= http://localhost:3000
 
-server-setup: ec2-init ## Create EC2 for pipeline server (~2 min)
-	@echo "Creating Pipeline Server EC2 instance..."
-	terraform -chdir=terraform/ec2 apply -auto-approve -state=terraform-server.tfstate -var="deployment_name=server"
+server-setup: ec2-init ## Create EC2 for pipeline server (~2 min, 4 vCPU, 8GB+)
+	@echo "Creating Pipeline Server EC2 instance (t3.xlarge — 4 vCPU, 16GB RAM)..."
+	@terraform -chdir=terraform/ec2 apply -auto-approve -state=terraform-server.tfstate \
+		-var="deployment_name=server" -var="instance_type=t3.xlarge"
+	@echo ""
+	@SERVER_IP=$$(terraform -chdir=terraform/ec2 output -state=terraform-server.tfstate -raw public_ip 2>/dev/null); \
+	if ! echo "$$SERVER_IP" | grep -qE '^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$$'; then \
+		echo "Error: Failed to get server IP from terraform state."; \
+		exit 1; \
+	fi; \
+	echo "================================================================"; \
+	echo "  Server IP: $$SERVER_IP"; \
+	echo "  API:       http://$$SERVER_IP:$(SERVER_PORT)"; \
+	echo "================================================================"
 	@echo ""
 	@echo "Waiting 60s for instance boot + Docker install..."
 	@sleep 60

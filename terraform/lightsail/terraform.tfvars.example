@@ -1,0 +1,21 @@
+# Copy this file to terraform.tfvars and customize
+
+aws_region       = "us-west-2"
+bundle_id        = "medium_3_0"       # $20/mo — 4GB RAM, 2 vCPU, 80GB SSD
+blueprint_id     = "amazon_linux_2023"
+public_key_path  = "~/.ssh/openclaw-ls.pub"
+private_key_path = "~/.ssh/openclaw-ls"
+gateway_port     = 18789
+
+# Deployment name - use different names for multiple deployments
+# Examples: "main", "claude", "gemini", "openai", "dev", "prod"
+deployment_name = "main"
+
+# Lightsail Bundle Options:
+#   nano_3_0    — $3.50/mo  — 512MB RAM, 1 vCPU
+#   micro_3_0   — $5/mo     — 1GB RAM,   1 vCPU
+#   small_3_0   — $10/mo    — 2GB RAM,   1 vCPU
+#   medium_3_0  — $20/mo    — 4GB RAM,   2 vCPU  (Recommended)
+#   large_3_0   — $40/mo    — 8GB RAM,   2 vCPU
+#   xlarge_3_0  — $80/mo    — 16GB RAM,  4 vCPU
+#   2xlarge_3_0 — $160/mo   — 32GB RAM,  8 vCPU

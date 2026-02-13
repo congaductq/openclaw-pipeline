@@ -16,19 +16,22 @@ notify() {
   ./scripts/webhook-notify.sh "$type" "$msg" "${DEPLOY_NAME:-main}" 2>/dev/null || true
 }
 
+# Terraform directory (supports both EC2 and Lightsail)
+TF_DIR=${TF_DIR:-terraform/ec2}
+
 # State file flag for terraform (if provided via TF_STATE env var)
 TF_STATE_FLAG=""
 if [ -n "$TF_STATE" ]; then
   TF_STATE_FLAG="-state=$TF_STATE"
 fi
 
-# Get EC2 IP and SSH key from args or terraform output
+# Get instance IP and SSH key from args or terraform output
 if [ -z "$1" ]; then
-  echo -e "${BLUE}[1/6] Getting EC2 IP from Terraform...${NC}"
-  EC2_IP=$(terraform -chdir=terraform/ec2 output $TF_STATE_FLAG -raw public_ip 2>/dev/null)
+  echo -e "${BLUE}[1/6] Getting instance IP from Terraform...${NC}"
+  EC2_IP=$(terraform -chdir=$TF_DIR output $TF_STATE_FLAG -raw public_ip 2>/dev/null)
   if [ -z "$EC2_IP" ]; then
-    notify "failed" "EC2 IP not found — run ec2-setup first"
-    echo "Error: EC2 IP not found. Run 'make ec2-setup' first or pass IP as argument."
+    notify "failed" "Instance IP not found — run setup first"
+    echo "Error: Instance IP not found. Run setup first or pass IP as argument."
     exit 1
   fi
 else
@@ -36,7 +39,7 @@ else
 fi
 
 if [ -z "$2" ]; then
-  SSH_KEY=$(terraform -chdir=terraform/ec2 output $TF_STATE_FLAG -json | jq -r '.ssh_command.value' | sed -n 's/.*-i \([^ ]*\).*/\1/p')
+  SSH_KEY=$(terraform -chdir=$TF_DIR output $TF_STATE_FLAG -json | jq -r '.ssh_command.value' | sed -n 's/.*-i \([^ ]*\).*/\1/p')
   if [ -z "$SSH_KEY" ]; then
     SSH_KEY="~/.ssh/openclaw.pem"
   fi

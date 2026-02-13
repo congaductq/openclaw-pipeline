@@ -1,134 +1,117 @@
 # OpenClaw Deployment Pipeline
 
-## Quick Start
+Deploy and manage OpenClaw AI gateway instances on AWS.
 
-```bash
-make quick-docker
-```
-
-Auto-generates `.env` with a new token and starts the container. Pass API keys inline:
-
-```bash
-make quick-docker OPENAI_API_KEY=xxx
-```
-
-## Manual Setup
-
-### 1. Configure environment
-
-Copy and edit the example env file:
-
-```bash
-cp .env.example .env
-```
-
-Fill in your API key (at least one provider):
-
-```
-OPENCLAW_GATEWAY_TOKEN=<your-token>
-ANTHROPIC_API_KEY=<key>
-# or GEMINI_API_KEY, OPENAI_API_KEY, GROQ_API_KEY, etc.
-```
-
-### 2. Start the container
-
-```bash
-make install-docker
-```
-
-### 3. Run onboarding
-
-```bash
-make onboard-docker
-```
-
-## Available Commands
-
-| Command | Description |
-|---------|-------------|
-| `make quick-docker` | All-in-one start (recommended) |
-| `make install-docker` | Start container |
-| `make onboard-docker` | Run onboarding wizard |
-| `make update-docker` | Pull latest image and restart |
-| `make logs-docker` | Follow container logs |
-| `make test-docker` | Test deployment health |
-| `make docker-build` | Build local image |
-| `make docker-shell` | Shell into container |
-| `make docker-clean` | Stop and remove container + volumes |
-| `make open` | Open dashboard in browser (auto-authenticates) |
-| `make setup-docker-env` | Generate `.env` from `openclaw.json` |
-| `make sync-docker-config` | Sync `openclaw.json` into running container |
-| `make approve` | Approve pending browser device for dashboard |
-
-## AWS EKS Deployment
-
-Deploy OpenClaw to a managed Kubernetes cluster on AWS.
-
-### Prerequisites
+## Prerequisites
 
 - [AWS CLI](https://aws.amazon.com/cli/) configured with credentials
-- [Terraform](https://www.terraform.io/downloads) >= 1.5
-- [kubectl](https://kubernetes.io/docs/tasks/tools/)
-
-### 1. Configure Terraform
+- [Terraform](https://www.terraform.io/downloads) >= 1.0
+- [Docker](https://docs.docker.com/get-docker/) (for local development only)
 
 ```bash
-cp terraform/terraform.tfvars.example terraform/terraform.tfvars
-# Edit terraform.tfvars with your preferred region, instance type, etc.
+aws sts get-caller-identity  # Verify AWS credentials
+terraform version             # Should show v1.0+
 ```
 
-### 2. Create EKS Cluster
+## Quick Start
+
+### EC2 (Recommended)
 
 ```bash
-make deploy-init     # Initialize Terraform
-make deploy-plan     # Preview changes
-make deploy-apply    # Create VPC + EKS cluster (~15 min)
+make ec2-full-setup CLAUDE_CODE_OAUTH_TOKEN=sk-ant-oat01-YOUR_TOKEN_HERE
 ```
 
-### 3. Configure kubectl
+**Total time**: ~3 minutes | **Specs**: t3.medium (2 vCPU, 4GB RAM)
+
+This creates an SSH key, provisions an EC2 instance, installs Docker, deploys OpenClaw, and shows your dashboard URL.
+
+### Docker (Local Development)
 
 ```bash
-aws eks update-kubeconfig --region ap-southeast-1 --name openclaw
+make quick-docker CLAUDE_CODE_OAUTH_TOKEN=sk-ant-oat01-YOUR_TOKEN_HERE
 ```
 
-### 4. Create Secrets
-
-Option A — from `.env` file:
-```bash
-make setup-docker-env   # Generate .env if not exists
-make k8s-secret         # Create K8s secret from .env
-```
-
-Option B — edit `k8s/secret.yaml` directly and apply:
-```bash
-kubectl apply -f k8s/secret.yaml
-```
-
-### 5. Deploy to Kubernetes
+### Lightsail (Alternative)
 
 ```bash
-make k8s-apply
+make ls-full-setup CLAUDE_CODE_OAUTH_TOKEN=sk-ant-oat01-YOUR_TOKEN_HERE
 ```
 
-### 6. Access Dashboard
+### EKS (Production at Scale)
 
 ```bash
-# Get the NLB endpoint
-kubectl get svc openclaw -n openclaw
-
-# Open: http://<NLB-HOSTNAME>:18789
+make quick-deploy
 ```
 
-### EKS Commands
+## Deployment Options
+
+| Option | Cost/Month | Setup Time | Best For |
+|--------|-----------|------------|----------|
+| **EC2** (default) | ~$30 variable | ~3 min | Most use cases |
+| Docker | Free | ~1 min | Local development |
+| Lightsail | $20 fixed | ~2 min | Fixed pricing |
+| EKS | $75+ | ~15 min | Production at scale |
+
+## Multiple Instances
+
+Deploy separate instances for different AI providers:
+
+```bash
+make ec2-full-setup CLAUDE_CODE_OAUTH_TOKEN=sk-ant-oat01-... NAME=claude
+make ec2-full-setup GEMINI_API_KEY=... NAME=gemini
+make ec2-full-setup OPENAI_API_KEY=sk-... NAME=openai
+```
+
+## Documentation
+
+| Document | Description |
+|----------|-------------|
+| [INSTANCE.md](INSTANCE.md) | OpenClaw Docker instance deployment & management |
+| [PIPELINE.md](PIPELINE.md) | Pipeline server (Go API) for orchestrating deployments |
+| [PROMPT.md](PROMPT.md) | Project knowledge base for AI context |
+
+## Common Commands
+
+### EC2 (Default)
 
 | Command | Description |
 |---------|-------------|
-| `make deploy-init` | Initialize Terraform |
-| `make deploy-plan` | Preview infrastructure changes |
-| `make deploy-apply` | Create/update AWS infrastructure |
-| `make deploy-destroy` | Destroy all AWS resources |
-| `make k8s-apply` | Deploy OpenClaw to Kubernetes |
-| `make k8s-status` | Show all resources in openclaw namespace |
-| `make k8s-logs` | Tail pod logs |
-| `make k8s-shell` | Shell into running pod |
-| `make k8s-secret` | Create K8s secret from `.env` file |
+| `make ec2-full-setup` | Complete setup from scratch |
+| `make deploy-ec2` | Deploy/update OpenClaw |
+| `make ec2-logs` | Tail container logs |
+| `make ec2-shell` | SSH into instance |
+| `make ec2-tunnel` | SSH tunnel for localhost access |
+| `make ec2-cloudflare-tunnel` | Cloudflare HTTPS tunnel |
+| `make ec2-url` | Show dashboard URL |
+| `make ec2-restart` | Restart containers |
+| `make ec2-destroy` | Destroy instance |
+
+### Docker (Local)
+
+| Command | Description |
+|---------|-------------|
+| `make quick-docker` | All-in-one start |
+| `make install-docker` | Start container |
+| `make logs-docker` | Follow logs |
+| `make docker-shell` | Shell into container |
+| `make open` | Open dashboard in browser |
+| `make approve` | Approve pending device |
+
+### Pipeline Server
+
+| Command | Description |
+|---------|-------------|
+| `make server-full-setup` | Full pipeline server setup (EC2) |
+| `make server-logs` | Tail server logs |
+| `make server-url` | Show API URL |
+
+### Lightsail (Alternative)
+
+| Command | Description |
+|---------|-------------|
+| `make ls-full-setup` | Complete Lightsail setup |
+| `make deploy-ls` | Deploy/update on Lightsail |
+| `make ls-logs` | Tail logs on Lightsail |
+| `make ls-shell` | SSH to Lightsail |
+
+Run `make help` for the full list of available commands.
